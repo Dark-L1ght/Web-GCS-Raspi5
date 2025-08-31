@@ -1,0 +1,15 @@
+# .gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+
+
+# Log files
+*.log
+*.log.full
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store

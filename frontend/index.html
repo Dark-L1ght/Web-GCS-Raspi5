@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>King Phoenix GCS</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-rotatedmarker@0.2.0/leaflet.rotatedMarker.min.js"></script>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+    <h1>King Phoenix AIO GCS</h1>
+    <div class="status-bar">
+        <div class="status-item">
+            <div class="label">Arm Status</div>
+            <div class="value" id="arm-status">DISARMED</div>
+        </div>
+        
+        <div class="status-item">
+            <div class="label">Flight Mode</div>
+            <div class="value" id="flight-mode">--</div>
+        </div>
+
+        <div class="status-item">
+            <div class="label">Battery</div>
+            <div class="value" id="battery-level">--%</div>
+        </div>
+        <div class="status-item">
+            <div class="label">Status</div>
+            <div class="value" id="connection-status">DISCONNECTED</div>
+        </div>
+    </div>
+</header>
+
+    <main class="main-container">
+
+        <div class="content-area">
+            <div id="camera-panel" class="panel">
+                <img id="camera-feed" alt="/assets/camera-placeholder.jpg">
+            </div>
+            <div id="map-panel" class="panel">
+                <h2>Satellite Map</h2>
+                <div id="map"></div>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            
+            <div id="waypoint-planner" class="panel">
+                <div class="button-group">
+                <button id="record-wp-btn" class="action-button">Record Logistics 1</button>
+                <button id="clear-wp-btn" class="action-button alt-action">Clear Waypoints</button>
+                </div>
+                <div id="wp-display">
+                    <p>No waypoints recorded.</p>
+                </div>
+            </div>
+            <div id="actions-panel" class="panel">
+                <h2>Actions</h2>
+                <div class="button-group">
+                    <button id="start-mission-btn" class="action-button">Start Mission</button>
+                    <button id="stop-mission-btn" class="action-button">Stop Mission</button>
+                </div>
+            </div>
+            <div id="flight-data-panel" class="panel">
+                <h2>Flight Data</h2>
+                <div class="data-grid">
+                    <div class="data-point"> <div class="label">Pitch</div> <div class="value" id="data-pitch">-- °</div> </div>
+                    <div class="data-point"> <div class="label">Roll</div> <div class="value" id="data-roll">-- °</div> </div>
+                    <div class="data-point"> <div class="label">Heading</div> <div class="value" id="data-heading">-- °</div> </div>
+                    <div class="data-point"> <div class="label">Altitude (Rel)</div> <div class="value" id="data-alt">-- m</div> </div>
+                    <div class="data-point"> <div class="label">Latitude</div> <div class="value" id="data-latitude">--</div> </div>
+                    <div class="data-point"> <div class="label">Longitude</div> <div class="value" id="data-longitude">--</div> </div>
+                    <div class="data-point"> <div class="label">Ground Speed</div> <div class="value" id="data-groundspeed">-- m/s</div> </div>
+                    <div class="data-point"> <div class="label">Vertical Speed</div> <div class="value" id="data-climb">-- m/s</div> </div>
+                    <div class="data-point"> <div class="label">Rangefinder</div> <div class="value" id="data-rangefinder">-- m</div> </div>
+                </div>
+            </div>
+            <div id="log-panel" class="panel">
+                <h2>MAVLink Log</h2>
+                <div id="log-container"></div>
+            </div>
+        </div>
+
+    </main>
+    
+    <script src="main.js" defer></script>
+</body>
+</html>

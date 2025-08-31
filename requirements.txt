@@ -1,0 +1,5 @@
+# requirements.txt
+pymavlink
+websockets
+numpy
+flask
