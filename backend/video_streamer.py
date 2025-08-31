@@ -236,7 +236,7 @@ if __name__ == "__main__":
         "video_server.py",
         "--hef-path", "/home/kingphoenix/KP-Detect-Test/kpDetectv2.1-yolov11n.hef", # UPDATE THIS PATH
         "--labels-json", "target.json",       # Ensure this file exists
-        "--input", "/dev/video0",
+        "--input", "v4l2src device=/dev/video0 ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert",
         "--show-fps"
         # Add other flags if needed, e.g., '--sync', 'false'
     ]
