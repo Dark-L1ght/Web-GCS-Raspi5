@@ -47,10 +47,10 @@ POSITION_CONTROL_BITMASK = 0b110111111000
 # --- Mission Waypoints ---
 # IMPORTANT: Update these with your actual GPS coordinates
 WAYPOINTS = [
-    (-7.8333808, 110.3843772, 3.5), # Waypoint 1 (Precision Land on Logistics - ID 0)
-    (-7.8333350, 110.3843705, 3.5), # Waypoint 2 (Precision Land on Logistics - ID 0)
-    (-7.8332890, 110.3843750, 3.5), # Waypoint 3 (Center on Barrel - ID 1)
-    (-7.8332528, 110.3843930, 3.5)  # Waypoint 4 (Final Normal Land)
+    (-7.8332912, 110.3842767, 2.5), # Waypoint 1 (Precision Land on Logistics - ID 0)
+    (-7.8333110, 110.3842802, 2.5), # Waypoint 2 (Precision Land on Logistics - ID 0)
+    (-7.8333401, 110.3842762, 2.5), # Waypoint 3 (Center on Barrel - ID 1)
+    (-7.8333536, 110.3842784, 2.5)  # Waypoint 4 (Final Normal Land)
 ]
 
 # --- Global Socket ---
@@ -317,8 +317,8 @@ def execute_precision_landing(master, sock, target_class_id):
             
             target_area = 0.2 * (w * h)
             area_error = 1.0 - (area / target_area) if target_area > 0 else 0
-            down_vel = TRACKING_SPEED * area_error * ALT_GAIN if abs(area_error) > 0.2 else 0
-            
+            # down_vel = TRACKING_SPEED * area_error * ALT_GAIN if abs(area_error) > 0.2 else 0
+            down_vel = 0
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -344,9 +344,9 @@ def execute_precision_landing(master, sock, target_class_id):
                 print(f"-> Phase 2: Ascending to search at {REACQUIRE_ASCEND_SPEED} m/s.")
                 vz = -REACQUIRE_ASCEND_SPEED
 
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
+            #master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+            #    0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            #    VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
             
 def main():
     """Main function to connect to the drone and run the new mission."""

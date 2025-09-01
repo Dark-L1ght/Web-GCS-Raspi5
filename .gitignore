@@ -4,7 +4,10 @@
 __pycache__/
 *.pyc
 
-
+venv_hailo_rpi_examples/
+mav.tlog
+mav.parm
+mav.tlog.raw
 # Log files
 *.log
 *.log.full

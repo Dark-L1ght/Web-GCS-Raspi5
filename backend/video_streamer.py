@@ -232,13 +232,14 @@ if __name__ == "__main__":
 
     # Define arguments for the GStreamer app
     # This replaces the need to pass them on the command line
+
     fake_argv = [
-        "video_server.py",
-        "--hef-path", "/home/kingphoenix/KP-Detect-Test/kpDetectv2.1-yolov11n.hef", # UPDATE THIS PATH
-        "--labels-json", "target.json",       # Ensure this file exists
-        "--input", "v4l2src device=/dev/video0 ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert",
-        "--show-fps"
-        # Add other flags if needed, e.g., '--sync', 'false'
+       "video_streamer.py",
+       "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv2.1-yolov11n.hef",
+       "--labels-json", "/home/kingphoenix/Web-GCS-Raspi5/backend/target.json",
+       "--arch" , "hailo8",
+       # KEEP THE INPUT SIMPLE
+       "--input", "/dev/video0",
     ]
     sys.argv = fake_argv
 

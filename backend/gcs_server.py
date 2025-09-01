@@ -145,9 +145,8 @@ async def handler(websocket):
                     waypoints_json_str = json.dumps(waypoints)
                     
                     # IMPORTANT: Update this path to be the correct one on your drone
-                    script_path = '/home/kingphoenix/Web-GCS/backend/movement.py'
-                    
-                    mission_command = f"python3 {script_path} '{waypoints_json_str}'"
+                    script_path = '/home/kingphoenix/Web-GCS-Raspi5/run_mission_with_setup.sh'
+                    mission_command = f"{script_path} '{waypoints_json_str}'"
                     
                     # Run the blocking SSH call in a separate thread
                     asyncio.create_task(asyncio.to_thread(execute_ssh_command, mission_command))
