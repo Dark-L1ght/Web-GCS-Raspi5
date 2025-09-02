@@ -30,6 +30,18 @@ header {
     justify-content: space-between;
     align-items: center;
 }
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px; 
+}
+
+.header-logo {
+    height: clamp(2rem, 5vw, 3rem); /* Increased the height values */
+    width: auto; /* Keeps the aspect ratio */
+}
+
 header h1 {
     margin: 0;
     font-size: clamp(1rem, 2.5vw, 1.5rem);
