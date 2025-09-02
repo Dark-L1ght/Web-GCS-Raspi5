@@ -235,11 +235,12 @@ if __name__ == "__main__":
 
     fake_argv = [
        "video_streamer.py",
-       "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv2.1-yolov11n.hef",
+       "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv2.0-yolov11n.hef",
        "--labels-json", "/home/kingphoenix/Web-GCS-Raspi5/backend/target.json",
        "--arch" , "hailo8",
        # KEEP THE INPUT SIMPLE
        "--input", "/dev/video0",
+       "--use-frame",
     ]
     sys.argv = fake_argv
 

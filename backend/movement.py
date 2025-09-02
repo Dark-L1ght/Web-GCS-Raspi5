@@ -16,13 +16,12 @@ TRACKING_SPEED = 0.5    # m/s
 FWD_GAIN = 1.0
 ALT_GAIN = 0.5
 
-LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
+LANDING_APPROACH_ALT = 0.75 # meters, altitude to trigger final LAND command
 LANDING_TIMEOUT = 15 # seconds to search before aborting landing
 
 CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
-CENTERING_ALTITUDE = 1.0 # meters, altitude to hold when centering
-CENTERING_CONFIRM_TIME = 5.0 # seconds, time to hold position to confirm centering
-DROP_HOVER_DURATION = 8.0 # Seconds to hover over the barrel for the drop
+CENTERING_ALTITUDE = 0.7 # meters, altitude to hold when centering
+CENTERING_HOLD_DURATION = 3.0 # Seconds to hold position once centered
 
 TARGET_LOST_HOVER_DURATION = 3.0  # Seconds to hover before starting active search
 REACQUIRE_ASCEND_ALTITUDE = 1.5   # Meters to climb above current altitude to search
@@ -122,7 +121,7 @@ def arm_and_takeoff(master, altitude):
 
         current_altitude = msg.relative_alt / 1000.0
         print(f"Current altitude: {current_altitude:.2f}m")
-        if current_altitude >= altitude * 0.95:
+        if current_altitude >= altitude * 0.90:
             print("Target altitude reached.")
             return True # Indicate successful takeoff
         time.sleep(0.1)
@@ -163,10 +162,21 @@ def navigate_to_waypoint(master, lat, lon, alt):
 
 def calculate_velocities(x_center, y_center, frame_w, frame_h):
     """Calculates horizontal velocities to track the target."""
-    x_offset = (x_center - frame_w / 2) / (frame_w / 2)
+
+    # --- FIX FOR MIRRORED VIDEO ---
+    # The Hailo GStreamer pipeline flips the video horizontally. To compensate,
+    # we "un-mirror" the x_center coordinate before calculating the drone's movement.
+    corrected_x_center = frame_w - x_center
+    # --- END FIX ---
+
+    # Use the corrected coordinate for the rest of the calculation.
+    # The y-axis (up/down) is not affected.
+    x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
     y_offset = (y_center - frame_h / 2) / (frame_h / 2)
+    
     right_vel = TRACKING_SPEED * x_offset if abs(x_offset) > 0.1 else 0
     forward_vel = -TRACKING_SPEED * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
+    
     return forward_vel, right_vel
 
 def flush_socket_buffer(sock):
@@ -180,89 +190,94 @@ def flush_socket_buffer(sock):
             break
 
 def center_above_target(master, sock, target_class_id):
-    """Centers the drone, then holds position to simulate a logistic drop."""
+    """
+    Centers the drone above a target and holds the position for a specified duration,
+    while actively correcting for drift.
+    """
     flush_socket_buffer(sock)
     send_control_command('resume')
     print(f"Centering above target (ID: {target_class_id}) at {CENTERING_ALTITUDE}m...")
-    
-    search_start_time = time.time()
-    centered_start_time = None
-    last_detection_time = time.time() # Initialize the timer once
+
+    overall_start_time = time.time()
+    last_detection_time = time.time()
+
+    centered_start_time = None # This will track when we start the hold
 
     while True:
-        if time.time() - search_start_time > CENTERING_TIMEOUT:
-            print("Centering timeout reached. Aborting and hovering.")
+        # Overall timeout for the maneuver
+        if time.time() - overall_start_time > CENTERING_TIMEOUT:
+            print("\nCentering timeout reached. Aborting.")
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             return False
 
+        # --- Continuous Correction Loop ---
+        fwd_vel, right_vel, down_vel = 0, 0, 0
+        is_target_visible = False
+        detection_data = None
+
         try:
-            alt_msg = master.recv_match(type='RANGEFINDER', blocking=True, timeout=0.2)
-            current_alt = alt_msg.distance if alt_msg else CENTERING_ALTITUDE
-            
             data, _ = sock.recvfrom(1024)
-            detection = json.loads(data.decode())
-            
-            # Check for a valid target FIRST
-            if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
-                raise socket.timeout() # If not valid, jump to reacquisition logic
+            detection_data = json.loads(data.decode())
+            if detection_data.get("state") == "TRACKING" and detection_data.get("class_id") == target_class_id:
+                is_target_visible = True
+                last_detection_time = time.time()
+                x, y = detection_data["x_center"], detection_data["y_center"]
+                w, h = detection_data["frame_width"], detection_data["frame_height"]
+                fwd_vel, right_vel = calculate_velocities(x, y, w, h)
+        except (socket.timeout, json.JSONDecodeError, KeyError):
+            is_target_visible = False
 
-            # --- FIX: Only update timers AFTER a successful and valid detection ---
-            last_detection_time = time.time() 
-            search_start_time = time.time() # Reset the main timeout as well
-            # --- END FIX ---
+        alt_msg = master.recv_match(type='RANGEFINDER', blocking=False, timeout=0.05)
+        current_alt = alt_msg.distance if alt_msg else CENTERING_ALTITUDE
+        horizontal_gain = get_dynamic_gain(current_alt)
+        fwd_vel *= horizontal_gain
+        right_vel *= horizontal_gain
 
-            x, y = detection["x_center"], detection["y_center"]
-            w, h = detection["frame_width"], detection["frame_height"]
-            fwd_vel, right_vel = calculate_velocities(x, y, w, h)
-            horizontal_gain = get_dynamic_gain(current_alt)
-            fwd_vel *= horizontal_gain
-            right_vel *= horizontal_gain
+        time_since_lost = time.time() - last_detection_time
+        if not is_target_visible and time_since_lost > TARGET_LOST_HOVER_DURATION:
+            down_vel = REACQUIRE_ASCEND_SPEED
+        else:
             alt_error = CENTERING_ALTITUDE - current_alt
             down_vel = -ALT_GAIN * alt_error
-            
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
 
-            center_error_ratio = abs(x - w / 2) / w
-            print(f"CENTERING (ID {target_class_id}): Alt: {current_alt:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}")
+        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
+        # --- End Continuous Correction Loop ---
 
-            if center_error_ratio < 0.10 and abs(alt_error) < 0.15:
+        # --- Simplified State Machine for Centering and Holding ---
+        if is_target_visible:
+            center_error_ratio = abs(detection_data["frame_width"]/2 - detection_data["x_center"]) / detection_data["frame_width"]
+
+            if center_error_ratio < 0.1 and abs(CENTERING_ALTITUDE - current_alt) < 0.15:
+                # Condition: We are centered
                 if centered_start_time is None:
                     centered_start_time = time.time()
-                elif time.time() - centered_start_time > CENTERING_CONFIRM_TIME:
-                    print("Target centering confirmed.")
-                    print(f"Simulating logistic drop. Holding position for {DROP_HOVER_DURATION} seconds...")
-                    drop_start_time = time.time()
-                    while time.time() - drop_start_time < DROP_HOVER_DURATION:
-                        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                            VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-                        time_left = DROP_HOVER_DURATION - (time.time() - drop_start_time)
-                        sys.stdout.write(f"\rDropping... {time_left:.1f}s remaining. ")
-                        sys.stdout.flush()
-                        time.sleep(0.1)
-                    print("\nDrop complete. Proceeding with mission.")
-                    return True
-            else:
-                centered_start_time = None
+                    print("\nTarget centered. Holding position...")
 
-        except (socket.timeout, json.JSONDecodeError, KeyError):
-            time_since_lost = time.time() - last_detection_time
-            print(f"Searching for target ID {target_class_id}... Time since last seen: {time_since_lost:.1f}s")
-            
-            vz = 0 
-            if time_since_lost < TARGET_LOST_HOVER_DURATION:
-                print("-> Phase 1: Hovering briefly.")
-            else:
-                print(f"-> Phase 2: Ascending to search at {REACQUIRE_ASCEND_SPEED} m/s.")
-                vz = -REACQUIRE_ASCEND_SPEED
+                # Check if the hold duration has been met
+                if time.time() - centered_start_time > CENTERING_HOLD_DURATION:
+                    print(f"\nHeld position for {CENTERING_HOLD_DURATION} seconds. Proceeding with mission.")
+                    return True # Success
 
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
+                # Update user on hold progress
+                time_left = CENTERING_HOLD_DURATION - (time.time() - centered_start_time)
+                sys.stdout.write(f"\rHolding position... {time_left:.1f}s remaining.")
+                sys.stdout.flush()
+            else:
+                # Condition: We are visible but have drifted off-center
+                if centered_start_time is not None:
+                    print("\nDrifted off-center. Re-centering...")
+                centered_start_time = None # Reset the hold timer
+        else:
+            # Condition: Target is not visible
+            sys.stdout.write(f"\rSearching for target... Time since last seen: {time_since_lost:.1f}s")
+            sys.stdout.flush()
+            centered_start_time = None # Reset hold timer if we lose the target
+
+        time.sleep(0.05)
 
 def get_dynamic_gain(current_alt):
     """Calculates a dynamic gain scaling factor based on altitude."""
@@ -298,8 +313,8 @@ def execute_precision_landing(master, sock, target_class_id):
             detection = json.loads(data.decode())
             
             # Check for a valid target FIRST
-            if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
-                raise socket.timeout()
+            #if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
+            #    raise socket.timeout()
 
             # --- FIX: Only update timers AFTER a successful and valid detection ---
             last_detection_time = time.time()
@@ -317,12 +332,10 @@ def execute_precision_landing(master, sock, target_class_id):
             
             target_area = 0.2 * (w * h)
             area_error = 1.0 - (area / target_area) if target_area > 0 else 0
-            # down_vel = TRACKING_SPEED * area_error * ALT_GAIN if abs(area_error) > 0.2 else 0
-            down_vel = 0
+            down_vel = TRACKING_SPEED * area_error * ALT_GAIN if abs(area_error) > 0.2 else 0
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
-
             center_error_ratio = abs(x - w / 2) / w
             print(f"LANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}")
 
@@ -344,9 +357,9 @@ def execute_precision_landing(master, sock, target_class_id):
                 print(f"-> Phase 2: Ascending to search at {REACQUIRE_ASCEND_SPEED} m/s.")
                 vz = -REACQUIRE_ASCEND_SPEED
 
-            #master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-            #    0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            #    VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
             
 def main():
     """Main function to connect to the drone and run the new mission."""
