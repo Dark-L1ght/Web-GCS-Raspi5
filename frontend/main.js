@@ -2,8 +2,14 @@
 const COMPANION_COMPUTER_IP = '192.168.10.212';
 const MISSION_ALTITUDE = 2.0; // Default altitude for waypoints
 
-// --- NEW: WAYPOINT STATE ---
-let recordedWaypoints = [];
+// --- WAYPOINT STATE ---
+// Check localStorage for saved waypoints when the page loads
+const savedWaypoints = localStorage.getItem('kingPhoenixWaypoints');
+let recordedWaypoints = savedWaypoints ? JSON.parse(savedWaypoints) : [];
+if (savedWaypoints) {
+    console.log('Loaded waypoints from local storage:', recordedWaypoints);
+}
+
 const WAYPOINT_LABELS = ['Logistics 1', 'Logistics 2', 'Barrel', 'Final Land'];
 let currentVehicleState = {}; // Store the latest state globally
 
@@ -40,7 +46,7 @@ const distanceElem = document.getElementById('data-rangefinder');
 const startMissionBtn = document.getElementById('start-mission-btn');
 const stopMissionBtn = document.getElementById('stop-mission-btn');
 
-// --- NEW: WAYPOINT UI REFERENCES ---
+// --- WAYPOINT UI REFERENCES ---
 const recordWpBtn = document.getElementById('record-wp-btn');
 const clearWpBtn = document.getElementById('clear-wp-btn');
 const wpDisplay = document.getElementById('wp-display');
@@ -56,14 +62,14 @@ function connectWebSocket() {
         connectionStatusElem.textContent = 'CONNECTED';
         connectionStatusElem.style.backgroundColor = 'var(--secondary-color)';
         wsConnection = ws;
-        updateUIState(); // NEW: Update UI based on connection
+        updateUIState();
     };
     ws.onmessage = (event) => {
         const message = JSON.parse(event.data);
         if (message.type === 'log') {
             updateLog(message);
         } else if (message.type === 'state') {
-            currentVehicleState = message.data; // NEW: Store state
+            currentVehicleState = message.data;
             updateAll(currentVehicleState);
         }
     };
@@ -72,7 +78,7 @@ function connectWebSocket() {
         connectionStatusElem.textContent = 'DISCONNECTED';
         connectionStatusElem.style.backgroundColor = 'var(--error-color)';
         wsConnection = null;
-        updateUIState(); // NEW: Update UI based on connection
+        updateUIState();
         setTimeout(connectWebSocket, 3000);
     };
     ws.onerror = (error) => {
@@ -81,7 +87,7 @@ function connectWebSocket() {
     };
 }
 
-// --- NEW: WAYPOINT MANAGEMENT FUNCTIONS ---
+// --- WAYPOINT MANAGEMENT FUNCTIONS ---
 function updateWpButton() {
     const nextIndex = recordedWaypoints.length;
     if (nextIndex < WAYPOINT_LABELS.length) {
@@ -110,7 +116,6 @@ function updateUIState() {
     const isConnected = wsConnection && wsConnection.readyState === WebSocket.OPEN;
     stopMissionBtn.disabled = !isConnected;
     
-    // Logic for enabling/disabling waypoint and mission buttons
     if (!isConnected) {
         recordWpBtn.disabled = true;
         clearWpBtn.disabled = true;
@@ -138,6 +143,7 @@ recordWpBtn.addEventListener('click', () => {
             alt: MISSION_ALTITUDE
         };
         recordedWaypoints.push(newWaypoint);
+        localStorage.setItem('kingPhoenixWaypoints', JSON.stringify(recordedWaypoints)); // SAVE
         console.log(`Recorded waypoint ${recordedWaypoints.length}:`, newWaypoint);
         updateWpButton();
         updateWpDisplay();
@@ -148,6 +154,7 @@ recordWpBtn.addEventListener('click', () => {
 clearWpBtn.addEventListener('click', () => {
     if (confirm("Are you sure you want to clear all recorded waypoints?")) {
         recordedWaypoints = [];
+        localStorage.removeItem('kingPhoenixWaypoints'); // CLEAR
         console.log("Waypoints cleared.");
         updateWpButton();
         updateWpDisplay();
@@ -163,7 +170,7 @@ startMissionBtn.addEventListener('click', () => {
         }
         const command = {
             action: 'start_mission',
-            waypoints: recordedWaypoints // NEW: Send waypoints with the command
+            waypoints: recordedWaypoints
         };
         wsConnection.send(JSON.stringify(command));
         console.log('Sent "start_mission" command with waypoints:', recordedWaypoints);
@@ -237,5 +244,7 @@ function updateLog(log) {
 
 // --- START THE APP ---
 cameraFeedElem.src = `http://${COMPANION_COMPUTER_IP}:5001/video_feed`;
-updateUIState(); // Initial UI setup
+updateUIState();
+updateWpButton(); // Renders button text correctly on load
+updateWpDisplay(); // Renders saved waypoints on load
 connectWebSocket();
