@@ -20,8 +20,8 @@ LANDING_APPROACH_ALT = 0.75 # meters, altitude to trigger final LAND command
 LANDING_TIMEOUT = 15 # seconds to search before aborting landing
 
 CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
-CENTERING_ALTITUDE = 0.7 # meters, altitude to hold when centering
-CENTERING_HOLD_DURATION = 3.0 # Seconds to hold position once centered
+CENTERING_ALTITUDE = 0.75 # meters, altitude to hold when centering
+CENTERING_HOLD_DURATION = 2.0 # Seconds to hold position once centered
 
 TARGET_LOST_HOVER_DURATION = 3.0  # Seconds to hover before starting active search
 REACQUIRE_ASCEND_ALTITUDE = 1.5   # Meters to climb above current altitude to search
@@ -202,6 +202,7 @@ def center_above_target(master, sock, target_class_id):
     last_detection_time = time.time()
 
     centered_start_time = None # This will track when we start the hold
+    last_known_alt = CENTERING_ALTITUDE     
 
     while True:
         # Overall timeout for the maneuver
@@ -229,12 +230,14 @@ def center_above_target(master, sock, target_class_id):
         except (socket.timeout, json.JSONDecodeError, KeyError):
             is_target_visible = False
 
-        alt_msg = master.recv_match(type='RANGEFINDER', blocking=False, timeout=0.05)
-        current_alt = alt_msg.distance if alt_msg else CENTERING_ALTITUDE
+        alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+        if alt_msg:
+            last_known_alt = alt_msg.current_distance / 100.0 
+        current_alt = last_known_alt
         horizontal_gain = get_dynamic_gain(current_alt)
         fwd_vel *= horizontal_gain
         right_vel *= horizontal_gain
-
+        
         time_since_lost = time.time() - last_detection_time
         if not is_target_visible and time_since_lost > TARGET_LOST_HOVER_DURATION:
             down_vel = REACQUIRE_ASCEND_SPEED
@@ -251,7 +254,7 @@ def center_above_target(master, sock, target_class_id):
         if is_target_visible:
             center_error_ratio = abs(detection_data["frame_width"]/2 - detection_data["x_center"]) / detection_data["frame_width"]
 
-            if center_error_ratio < 0.1 and abs(CENTERING_ALTITUDE - current_alt) < 0.15:
+            if center_error_ratio < 0.1 and abs(CENTERING_ALTITUDE - current_alt) < 0.05:
                 # Condition: We are centered
                 if centered_start_time is None:
                     centered_start_time = time.time()
@@ -306,8 +309,10 @@ def execute_precision_landing(master, sock, target_class_id):
             return False
 
         try:
-            alt_msg = master.recv_match(type='RANGEFINDER', blocking=False, timeout=0.05)
-            current_altitude = alt_msg.distance if alt_msg else GAIN_MAX_ALT 
+            alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+            if alt_msg:
+                last_known_alt = alt_msg.current_distance / 100.0 
+            current_altitude = last_known_alt
 
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
@@ -339,7 +344,7 @@ def execute_precision_landing(master, sock, target_class_id):
             center_error_ratio = abs(x - w / 2) / w
             print(f"LANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}")
 
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.10:
                 print("Target centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
                 time.sleep(2) # Pause after landing
@@ -387,9 +392,15 @@ def main():
     master.wait_heartbeat()
     print(f"Heartbeat from system (system {master.target_system} component {master.target_component})")
 
-    #Requesting Rangefinder data stream
-    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, mavutil.mavlink.MAVLINK_MSG_ID_RANGEFINDER, 1000000, 0, 0, 0, 0, 0)
-
+    print("Requesting DISTANCE_SENSOR stream at 10Hz...")
+    master.mav.command_long_send(
+        master.target_system, 
+        master.target_component, 
+        mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+        mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR, # <-- CORRECT MESSAGE ID
+        100000,  # <-- 100,000 us = 10Hz (much better for control)
+        0, 0, 0, 0, 0
+    )
     try:
         send_control_command('pause')
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
