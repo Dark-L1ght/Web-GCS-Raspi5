@@ -21,10 +21,8 @@ LANDING_TIMEOUT = 15 # seconds to search before aborting landing
 
 CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
 CENTERING_ALTITUDE = 0.75 # meters, altitude to hold when centering
-CENTERING_HOLD_DURATION = 2.0 # Seconds to hold position once centered
 
 TARGET_LOST_HOVER_DURATION = 3.0  # Seconds to hover before starting active search
-REACQUIRE_ASCEND_ALTITUDE = 1.5   # Meters to climb above current altitude to search
 REACQUIRE_ASCEND_SPEED = 0.3      # m/s for the search ascent
 
 GAIN_MAX_ALT = 2.0  # Altitude (m) at which the gain is 1.0 (full speed)
@@ -44,7 +42,6 @@ VELOCITY_CONTROL_BITMASK = 0b0000111111000111
 POSITION_CONTROL_BITMASK = 0b110111111000
 
 # --- Mission Waypoints ---
-# IMPORTANT: Update these with your actual GPS coordinates
 WAYPOINTS = [
     (-7.8332912, 110.3842767, 2.5), # Waypoint 1 (Precision Land on Logistics - ID 0)
     (-7.8333110, 110.3842802, 2.5), # Waypoint 2 (Precision Land on Logistics - ID 0)
@@ -80,8 +77,6 @@ def arm_and_takeoff(master, altitude):
         mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
         GUIDED_MODE
     )
-    
-    # --- Arming Retry Loop ---
     for attempt in range(1, ARMING_RETRIES + 1):
         print(f"Arming motors (Attempt {attempt}/{ARMING_RETRIES})...")
         try:
@@ -89,41 +84,31 @@ def arm_and_takeoff(master, altitude):
                 master.target_system, master.target_component,
                 mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
                 1, 0, 0, 0, 0, 0, 0)
-            
-            # Wait for the drone to confirm it's armed. 
-            # This will timeout and raise an exception on failure.
-            master.motors_armed_wait() 
-            
+            master.motors_armed_wait()
             print("Motors successfully armed!")
-            break # Exit the loop on success
-            
+            break
         except Exception as e:
             print(f"Arming failed on attempt {attempt}: {e}")
             if attempt == ARMING_RETRIES:
                 print("Could not arm motors after all attempts. Aborting takeoff.")
-                return False # Indicate failure
+                return False
             print(f"Retrying in {ARMING_RETRY_DELAY} seconds...")
             time.sleep(ARMING_RETRY_DELAY)
-
-    # --- Takeoff Logic (only runs if arming was successful) ---
     print(f"Taking off to {altitude} meters...")
     master.mav.command_long_send(
         master.target_system, master.target_component,
         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, altitude
     )
-    
-    # Wait for takeoff to complete
     while True:
         msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=10)
         if not msg:
             print("No GLOBAL_POSITION_INT message received for 10s. Aborting takeoff wait.")
             return False
-
         current_altitude = msg.relative_alt / 1000.0
         print(f"Current altitude: {current_altitude:.2f}m")
         if current_altitude >= altitude * 0.90:
             print("Target altitude reached.")
-            return True # Indicate successful takeoff
+            return True
         time.sleep(0.1)
 
 def land_normally(master):
@@ -167,16 +152,10 @@ def calculate_velocities(x_center, y_center, frame_w, frame_h):
     # The Hailo GStreamer pipeline flips the video horizontally. To compensate,
     # we "un-mirror" the x_center coordinate before calculating the drone's movement.
     corrected_x_center = frame_w - x_center
-    # --- END FIX ---
-
-    # Use the corrected coordinate for the rest of the calculation.
-    # The y-axis (up/down) is not affected.
     x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
     y_offset = (y_center - frame_h / 2) / (frame_h / 2)
-    
     right_vel = TRACKING_SPEED * x_offset if abs(x_offset) > 0.1 else 0
     forward_vel = -TRACKING_SPEED * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
-    
     return forward_vel, right_vel
 
 def flush_socket_buffer(sock):
@@ -191,8 +170,8 @@ def flush_socket_buffer(sock):
 
 def center_above_target(master, sock, target_class_id):
     """
-    Centers the drone above a target and holds the position for a specified duration,
-    while actively correcting for drift.
+    Centers the drone above a target. Once centered, it confirms the action
+    and immediately returns success.
     """
     flush_socket_buffer(sock)
     send_control_command('resume')
@@ -200,9 +179,7 @@ def center_above_target(master, sock, target_class_id):
 
     overall_start_time = time.time()
     last_detection_time = time.time()
-
-    centered_start_time = None # This will track when we start the hold
-    last_known_alt = CENTERING_ALTITUDE     
+    last_known_alt = CENTERING_ALTITUDE
 
     while True:
         # Overall timeout for the maneuver
@@ -232,7 +209,7 @@ def center_above_target(master, sock, target_class_id):
 
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
         if alt_msg:
-            last_known_alt = alt_msg.current_distance / 100.0 
+            last_known_alt = alt_msg.current_distance / 100.0
         current_alt = last_known_alt
         horizontal_gain = get_dynamic_gain(current_alt)
         fwd_vel *= horizontal_gain
@@ -250,35 +227,27 @@ def center_above_target(master, sock, target_class_id):
             VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
         # --- End Continuous Correction Loop ---
 
-        # --- Simplified State Machine for Centering and Holding ---
+        # --- Instant Confirmation Logic ---
         if is_target_visible:
             center_error_ratio = abs(detection_data["frame_width"]/2 - detection_data["x_center"]) / detection_data["frame_width"]
-
-            if center_error_ratio < 0.1 and abs(CENTERING_ALTITUDE - current_alt) < 0.05:
-                # Condition: We are centered
-                if centered_start_time is None:
-                    centered_start_time = time.time()
-                    print("\nTarget centered. Holding position...")
-
-                # Check if the hold duration has been met
-                if time.time() - centered_start_time > CENTERING_HOLD_DURATION:
-                    print(f"\nHeld position for {CENTERING_HOLD_DURATION} seconds. Proceeding with mission.")
-                    return True # Success
-
-                # Update user on hold progress
-                time_left = CENTERING_HOLD_DURATION - (time.time() - centered_start_time)
-                sys.stdout.write(f"\rHolding position... {time_left:.1f}s remaining.")
-                sys.stdout.flush()
+            
+            if center_error_ratio < 0.05 and abs(CENTERING_ALTITUDE - current_alt) < 0.10:
+                # Condition: We are centered. Task is complete.
+                print("\nTarget centered. Logistic drop confirmed.")
+                # Send one final hover command to stop any remaining movement
+                master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                    0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                    VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                time.sleep(0.5) # Brief pause to stabilize before next command
+                return True # Success
             else:
-                # Condition: We are visible but have drifted off-center
-                if centered_start_time is not None:
-                    print("\nDrifted off-center. Re-centering...")
-                centered_start_time = None # Reset the hold timer
+                # Not yet centered, update status and loop again
+                sys.stdout.write(f"\rCentering... Alt: {current_alt:.2f}m, Err: {center_error_ratio:.2%}")
+                sys.stdout.flush()
         else:
-            # Condition: Target is not visible
+            # Target not visible
             sys.stdout.write(f"\rSearching for target... Time since last seen: {time_since_lost:.1f}s")
             sys.stdout.flush()
-            centered_start_time = None # Reset hold timer if we lose the target
 
         time.sleep(0.05)
 
@@ -297,7 +266,8 @@ def execute_precision_landing(master, sock, target_class_id):
     print(f"Starting precision landing sequence on target (ID: {target_class_id})...")
     
     search_start_time = time.time()
-    last_detection_time = time.time() # Initialize the timer once
+    last_detection_time = time.time()
+    last_known_alt = TAKEOFF_ALTITUDE
 
     while True:
         if time.time() - search_start_time > LANDING_TIMEOUT:
@@ -305,13 +275,12 @@ def execute_precision_landing(master, sock, target_class_id):
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-            # I've added a 'return False' here to make it consistent with the mission planner suggestion
             return False
 
         try:
             alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
             if alt_msg:
-                last_known_alt = alt_msg.current_distance / 100.0 
+                last_known_alt = alt_msg.current_distance / 100.0
             current_altitude = last_known_alt
 
             data, _ = sock.recvfrom(1024)
@@ -321,15 +290,12 @@ def execute_precision_landing(master, sock, target_class_id):
             #if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
             #    raise socket.timeout()
 
-            # --- FIX: Only update timers AFTER a successful and valid detection ---
             last_detection_time = time.time()
             search_start_time = time.time()
-            # --- END FIX ---
 
             x, y, area = detection["x_center"], detection["y_center"], detection["area"]
             w, h = detection["frame_width"], detection["frame_height"]
             
-            # ... (rest of the function is identical) ...
             fwd_vel, right_vel = calculate_velocities(x, y, w, h)
             horizontal_gain = get_dynamic_gain(current_altitude)
             fwd_vel *= horizontal_gain
@@ -347,8 +313,7 @@ def execute_precision_landing(master, sock, target_class_id):
             if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.10:
                 print("Target centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
-                time.sleep(2) # Pause after landing
-                # I've added a 'return True' here for consistency
+                time.sleep(1)
                 return True
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
@@ -365,7 +330,7 @@ def execute_precision_landing(master, sock, target_class_id):
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
-            
+                        
 def main():
     """Main function to connect to the drone and run the new mission."""
 
