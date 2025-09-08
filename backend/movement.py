@@ -4,19 +4,26 @@ import time
 import math
 from pymavlink import mavutil
 import sys
+import servo_control
 
 # --- Drone & Mission Configuration ---
 CONNECTION_STRING = 'udp:127.0.0.1:14550'
 BAUD_RATE = 921600
-TAKEOFF_ALTITUDE = 2.0  # meters
+TAKEOFF_ALTITUDE = 1  # meters
 ARMING_RETRIES = 3      # Number of times to attempt arming
 ARMING_RETRY_DELAY = 3  # Seconds to wait between arming attempts
 WAYPOINT_RADIUS = 0.5   # meters
 TRACKING_SPEED = 0.5    # m/s
-FWD_GAIN = 1.0
-ALT_GAIN = 0.5
+FWD_GAIN = 0.6
+ALT_GAIN = 0.3
 
-LANDING_APPROACH_ALT = 0.75 # meters, altitude to trigger final LAND command
+# CAMERA CENTER OFFSET
+# This MUST match the value in video_streamer.py
+# 0.5 = geometric center of the frame.
+# 0.75 = 75% of the way down the frame (for a forward-mounted camera).
+VERTICAL_CENTER_RATIO = 0.15
+
+LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
 LANDING_TIMEOUT = 15 # seconds to search before aborting landing
 
 CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
@@ -25,10 +32,10 @@ CENTERING_ALTITUDE = 0.75 # meters, altitude to hold when centering
 TARGET_LOST_HOVER_DURATION = 3.0  # Seconds to hover before starting active search
 REACQUIRE_ASCEND_SPEED = 0.3      # m/s for the search ascent
 
-GAIN_MAX_ALT = 2.0  # Altitude (m) at which the gain is 1.0 (full speed)
-GAIN_MIN_ALT = 0.5  # Altitude (m) at which the gain is at its minimum
-MAX_HORIZONTAL_GAIN = 0.8 # The gain at or above GAIN_MAX_ALT
-MIN_HORIZONTAL_GAIN = 0.2 # The minimum gain at or below GAIN_MIN_ALT
+GAIN_MAX_ALT = 1.1  # Altitude (m) at which the gain is 1.0 (full speed)
+GAIN_MIN_ALT = 0.4  # Altitude (m) at which the gain is at its minimum
+MAX_HORIZONTAL_GAIN = 0.4 # The gain at or above GAIN_MAX_ALT
+MIN_HORIZONTAL_GAIN = 0.1 # The minimum gain at or below GAIN_MIN_ALT
 
 # --- UDP Network Configuration ---
 UDP_RECEIVE_IP = "127.0.0.2"
@@ -106,7 +113,7 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"Current altitude: {current_altitude:.2f}m")
-        if current_altitude >= altitude * 0.90:
+        if current_altitude >= altitude * 0.80:
             print("Target altitude reached.")
             return True
         time.sleep(0.1)
@@ -153,9 +160,16 @@ def calculate_velocities(x_center, y_center, frame_w, frame_h):
     # we "un-mirror" the x_center coordinate before calculating the drone's movement.
     corrected_x_center = frame_w - x_center
     x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
-    y_offset = (y_center - frame_h / 2) / (frame_h / 2)
+
+    # --- OFF_CENTER LOGIC ---
+    # Define the new target Y position based on the offset
+    target_y = frame_h * VERTICAL_CENTER_RATIO
+
+    # Use target_y instead of frame_h / 2 for the calculation
+    y_offset = (y_center - target_y) / (frame_h / 2)
     right_vel = TRACKING_SPEED * x_offset if abs(x_offset) > 0.1 else 0
     forward_vel = -TRACKING_SPEED * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
+    #forward_vel = TRACKING_SPEED * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
     return forward_vel, right_vel
 
 def flush_socket_buffer(sock):
@@ -232,13 +246,13 @@ def center_above_target(master, sock, target_class_id):
             center_error_ratio = abs(detection_data["frame_width"]/2 - detection_data["x_center"]) / detection_data["frame_width"]
             
             if center_error_ratio < 0.05 and abs(CENTERING_ALTITUDE - current_alt) < 0.10:
-                # Condition: We are centered. Task is complete.
-                print("\nTarget centered. Logistic drop confirmed.")
-                # Send one final hover command to stop any remaining movement
                 master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                     0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                     VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                 time.sleep(0.5) # Brief pause to stabilize before next command
+                print("\nTarget centered. Opening gripper to drop package.")
+                servo_control.open_gripper()
+                time.sleep(1.0) # Pause to ensure package is clear
                 return True # Success
             else:
                 # Not yet centered, update status and loop again
@@ -310,10 +324,13 @@ def execute_precision_landing(master, sock, target_class_id):
             center_error_ratio = abs(x - w / 2) / w
             print(f"LANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}")
 
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.10:
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
                 print("Target centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
                 time.sleep(1)
+                print("Landed. Closing gripper to pick up package.")
+                time.sleep(1)
+                servo_control.close_gripper()
                 return True
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
@@ -367,6 +384,8 @@ def main():
         0, 0, 0, 0, 0
     )
     try:
+        servo_control.setup()
+        servo_control.open_gripper() # Ensure gripper starts in the open position
         send_control_command('pause')
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
             raise Exception("Failed to takeoff for Mission 1. Aborting mission.")
@@ -376,18 +395,21 @@ def main():
         navigate_to_waypoint(master, WAYPOINTS[0][0], WAYPOINTS[0][1], WAYPOINTS[0][2])
         execute_precision_landing(master, sock=data_sock, target_class_id=0)
         
-        # --- Mission 2: Takeoff, fly to WP3 and Center on Target 1 ---
-        print("\n--- MISSION 2: Center over Target at Waypoint 3 (Target ID 1) ---")
+        # --- GOTO Corridor Elbow ---
         send_control_command('pause')
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
-            raise Exception("Failed to takeoff for Mission 3. Aborting mission.")
-        navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
+            raise Exception("Failed to takeoff for Elbow. Aborting mission.")
+        navigate_to_waypoint(master, WAYPOINTS[1][0], WAYPOINTS[1][1], WAYPOINTS[1][2])
+
+        # --- Mission 2: Takeoff, fly to WP3 and Center on Target 1 ---
+        print("\n--- MISSION 2: Center over Target at Waypoint 3 (Target ID 1) ---")
+        navigate_to_waypoint(master, WAYPOINTS[3][0], WAYPOINTS[3][1], WAYPOINTS[3][2])
         center_above_target(master, sock=data_sock, target_class_id=1)
 
         # --- Mission 3: Fly to WP2 and Precision Land on Target 0 ---
         print("\n--- MISSION 3: Precision Land at Waypoint 2 (Target ID 0) ---")
         send_control_command('pause')
-        navigate_to_waypoint(master, WAYPOINTS[1][0], WAYPOINTS[1][1], WAYPOINTS[1][2])
+        navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
         execute_precision_landing(master, sock=data_sock, target_class_id=0)
 
         # --- Mission 4: Takeoff, fly to WP3 and Center on Target 1 Again ---
@@ -395,13 +417,13 @@ def main():
         send_control_command('pause')
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
             raise Exception("Failed to takeoff for Mission 5. Aborting mission.")
-        navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
+        navigate_to_waypoint(master, WAYPOINTS[3][0], WAYPOINTS[3][1], WAYPOINTS[3][2])
         center_above_target(master, sock=data_sock, target_class_id=1)
 
         # --- Mission 5: Fly to WP4 and Land ---
         print("\n--- MISSION 5: Final Landing at Waypoint 4 ---")
         send_control_command('pause')
-        navigate_to_waypoint(master, WAYPOINTS[3][0], WAYPOINTS[3][1], WAYPOINTS[3][2])
+        navigate_to_waypoint(master, WAYPOINTS[4][0], WAYPOINTS[4][1], WAYPOINTS[4][2])
         land_normally(master)
 
         print("\nMission finished successfully!")
@@ -410,6 +432,7 @@ def main():
         print("Keyboard interrupt received. Landing immediately...")
         land_normally(master)
     finally:
+        servo_control.cleanup()
         if data_sock: data_sock.close()
         print("Resources cleaned up.")
 
