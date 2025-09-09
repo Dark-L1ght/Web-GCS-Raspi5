@@ -1,6 +1,6 @@
 import time
 import board
-from adafruit_pca9865 import PCA9685
+from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo
 
 # --- Configuration for TWO Servos ---
@@ -9,8 +9,8 @@ SERVO_RIGHT_CHANNEL = 1
 
 # --- Gripper Angle Configuration ---
 # Both servos will move to the same angle values.
-GRIPPER_OPEN_ANGLE = 65
-GRIPPER_CLOSE_ANGLE = 125
+GRIPPER_OPEN_ANGLE = 40
+GRIPPER_CLOSE_ANGLE = 130
 
 # --- Global Variables ---
 pca = None
@@ -48,6 +48,7 @@ def _set_gripper_angles(left_angle, right_angle):
     servo_left.angle = left_angle
     servo_right.angle = right_angle
     
+
     # Wait for the servos to move
     time.sleep(1.0)
     
@@ -59,13 +60,13 @@ def open_gripper():
     """Moves both servos to the 'open' position."""
     print(f"Opening gripper (Angle: {GRIPPER_OPEN_ANGLE})...")
     # Both servos move to the SAME open angle
-    _set_gripper_angles(GRIPPER_OPEN_ANGLE, GRIPPER_OPEN_ANGLE)
+    _set_gripper_angles(GRIPPER_OPEN_ANGLE + 20, GRIPPER_OPEN_ANGLE)
 
 def close_gripper():
     """Moves both servos to the 'close' position."""
     print(f"Closing gripper (Angle: {GRIPPER_CLOSE_ANGLE})...")
     # Both servos move to the SAME close angle
-    _set_gripper_angles(GRIPPER_CLOSE_ANGLE, GRIPPER_CLOSE_ANGLE)
+    _set_gripper_angles(GRIPPER_CLOSE_ANGLE + 20, GRIPPER_CLOSE_ANGLE)
 
 def cleanup():
     """

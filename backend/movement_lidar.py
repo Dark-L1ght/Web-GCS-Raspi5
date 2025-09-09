@@ -34,10 +34,10 @@ CENTERING_KP, CENTERING_KI, CENTERING_KD = 0.7, 0.03, 0.2
 # IMPORTANT: Use the lidar_test.py script to find the correct port for each direction,
 # then update this dictionary with your findings.
 LIDAR_PORTS = {
-    'front': '/dev/ttyAMA0', # Example port, change as needed
-    'back':  '/dev/ttyAMA1', # Example port, change as needed
-    'left':  '/dev/ttyAMA2', # Example port, change as needed
-    'right': '/dev/ttyAMA3'  # Example port, change as needed
+    'front': '/dev/ttyAMA3', # Example port, change as needed
+    'back':  '/dev/ttyAMA2', # Example port, change as needed
+    'left':  '/dev/ttyAMA1', # Example port, change as needed
+    'right': '/dev/ttyAMA0'  # Example port, change as needed
 }
 LIDAR_BAUDRATE = 115200
 
