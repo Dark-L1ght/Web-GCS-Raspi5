@@ -1,6 +1,6 @@
 // --- CONFIGURATION ---
 const COMPANION_COMPUTER_IP = '192.168.10.212';
-const MISSION_ALTITUDE = 2.0; // Default altitude for waypoints
+const MISSION_ALTITUDE = 0.8; // Default altitude for waypoints
 
 // --- WAYPOINT STATE ---
 // Check localStorage for saved waypoints when the page loads

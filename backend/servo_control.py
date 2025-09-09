@@ -1,76 +1,91 @@
-import RPi.GPIO as GPIO
 import time
+import board
+from adafruit_pca9865 import PCA9685
+from adafruit_motor import servo
 
-# --- Configuration ---
-# The GPIO pin connected to the servo's signal wire.
-SERVO_PIN = 18
+# --- Configuration for TWO Servos ---
+SERVO_LEFT_CHANNEL = 0
+SERVO_RIGHT_CHANNEL = 1
 
-# The angle values for the open and closed positions of your gripper.
-# Tune these values to match your gripper's physical limits.
-GRIPPER_OPEN_ANGLE = 55
-GRIPPER_CLOSE_ANGLE = 115
+# --- Gripper Angle Configuration ---
+# Both servos will move to the same angle values.
+GRIPPER_OPEN_ANGLE = 65
+GRIPPER_CLOSE_ANGLE = 125
 
 # --- Global Variables ---
-# We use a global variable for the PWM object so it can be accessed by all functions.
-pwm = None
+pca = None
+servo_left = None
+servo_right = None
 
 # --- Functions ---
 
 def setup():
     """
-    Initializes the GPIO pin for servo control.
-    This must be called once when your main script starts.
+    Initializes the I2C connection and BOTH servo motors on the PCA9685 board.
     """
-    global pwm
-    print("Initializing GPIO for servo control...")
-    GPIO.setwarnings(False) # Disable warnings
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(SERVO_PIN, GPIO.OUT)
+    global pca, servo_left, servo_right
+    print("Initializing I2C and PCA9685 for dual servo control...")
     
-    # Set up PWM on the servo pin with a 50Hz frequency.
-    pwm = GPIO.PWM(SERVO_PIN, 50)
-    pwm.start(0) # Start with no signal
-    print("Servo control initialized.")
+    i2c = board.I2C()
+    pca = PCA9685(i2c)
+    pca.frequency = 50
 
-def _set_angle(angle):
+    # Create two servo objects, one for each channel
+    servo_left = servo.Servo(pca.channels[SERVO_LEFT_CHANNEL])
+    servo_right = servo.Servo(pca.channels[SERVO_RIGHT_CHANNEL])
+    
+    print(f"Servo control initialized on channels {SERVO_LEFT_CHANNEL} (L) and {SERVO_RIGHT_CHANNEL} (R).")
+
+def _set_gripper_angles(left_angle, right_angle):
     """
-    Internal function to move the servo to a specific angle.
+    Internal function to move both servos to their respective angles.
     """
-    if not pwm:
-        print("Error: Servo not initialized. Call setup() first.")
+    if not pca:
+        print("Error: Servos not initialized. Call setup() first.")
         return
         
-    # Calculate the duty cycle required for the given angle
-    duty_cycle = (angle / 18) + 2
+    # Command both servos to move to their target angles
+    servo_left.angle = left_angle
+    servo_right.angle = right_angle
     
-    # Send the signal
-    GPIO.output(SERVO_PIN, True)
-    pwm.ChangeDutyCycle(duty_cycle)
-    
-    # Wait for the servo to move
+    # Wait for the servos to move
     time.sleep(1.0)
     
-    # Stop sending the signal to prevent servo jitter
-    GPIO.output(SERVO_PIN, False)
-    pwm.ChangeDutyCycle(0)
+    # De-energize both servos to prevent jitter
+    servo_left.angle = None
+    servo_right.angle = None
 
 def open_gripper():
-    """Moves the servo to the 'open' position."""
+    """Moves both servos to the 'open' position."""
     print(f"Opening gripper (Angle: {GRIPPER_OPEN_ANGLE})...")
-    _set_angle(GRIPPER_OPEN_ANGLE)
+    # Both servos move to the SAME open angle
+    _set_gripper_angles(GRIPPER_OPEN_ANGLE, GRIPPER_OPEN_ANGLE)
 
 def close_gripper():
-    """Moves the servo to the 'close' position."""
+    """Moves both servos to the 'close' position."""
     print(f"Closing gripper (Angle: {GRIPPER_CLOSE_ANGLE})...")
-    _set_angle(GRIPPER_CLOSE_ANGLE)
+    # Both servos move to the SAME close angle
+    _set_gripper_angles(GRIPPER_CLOSE_ANGLE, GRIPPER_CLOSE_ANGLE)
 
 def cleanup():
     """
-    Cleans up the GPIO pins.
-    This must be called once when your main script exits.
+    De-initializes the PCA9685 board, stopping all PWM signals.
     """
-    if pwm:
-        print("Stopping servo PWM and cleaning up GPIO...")
-        pwm.stop()
-    GPIO.cleanup()
-    print("GPIO cleanup complete.")
+    if pca:
+        print("De-initializing PCA9685...")
+        pca.deinit()
+    print("Cleanup complete.")
+
+# --- Main Execution Example ---
+if __name__ == '__main__':
+    try:
+        setup()
+        while True:
+            open_gripper()
+            time.sleep(2)
+            close_gripper()
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\nProgram interrupted.")
+    finally:
+        cleanup()
