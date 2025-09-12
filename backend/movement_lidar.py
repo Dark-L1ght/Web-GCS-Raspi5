@@ -228,7 +228,7 @@ def execute_precision_landing(master, sock, target_class_id):
                 horizontal_gain = get_dynamic_gain(current_altitude)
                 fwd_vel *= horizontal_gain
                 right_vel *= horizontal_gain
-                down_vel = 0.2  # Constant descent speed when target is visible
+                down_vel = 0.1  # Constant descent speed when target is visible
         except (socket.timeout, json.JSONDecodeError, KeyError):
             pass
 
