@@ -21,7 +21,7 @@ ALT_GAIN = 0.3
 # This MUST match the value in video_streamer.py
 # 0.5 = geometric center of the frame.
 # 0.75 = 75% of the way down the frame (for a forward-mounted camera).
-VERTICAL_CENTER_RATIO = 0.15
+VERTICAL_CENTER_RATIO = 0.25
 
 LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
 LANDING_TIMEOUT = 15 # seconds to search before aborting landing

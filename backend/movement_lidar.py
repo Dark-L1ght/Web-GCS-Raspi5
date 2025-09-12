@@ -14,7 +14,7 @@ import servo_control  # Assuming you have this file for servo control
 # --- Drone & Mission Configuration ---
 CONNECTION_STRING = 'udp:127.0.0.1:14550'
 BAUD_RATE = 921600
-TAKEOFF_ALTITUDE = 1.0  # meters
+TAKEOFF_ALTITUDE = 1.1  # meters
 ARMING_RETRIES = 3
 ARMING_RETRY_DELAY = 3
 
@@ -22,9 +22,9 @@ ARMING_RETRY_DELAY = 3
 WAYPOINT_RADIUS = 0.5   # meters
 TRACKING_SPEED = 0.5    # m/s
 FWD_GAIN = 0.6
-ALT_GAIN = 0.3
-VERTICAL_CENTER_RATIO = 0.15
-LANDING_APPROACH_ALT = 0.5
+ALT_GAIN = 0.2
+VERTICAL_CENTER_RATIO = 0.25
+LANDING_APPROACH_ALT = 0.4
 LANDING_TIMEOUT = 15
 CENTERING_TIMEOUT = 20
 CENTERING_ALTITUDE = 0.75
@@ -59,9 +59,10 @@ POSITION_CONTROL_BITMASK = 0b110111111000
 
 # --- Global Socket ---
 data_sock = None
+has_turned_corner = False
 
 # ==============================================================================
-# Lidar Manager Class
+# Lidar Manager Class (Unchanged)
 # ==============================================================================
 class LidarManager:
     """Manages threaded reading of multiple TFmini lidars connected to the Pi."""
@@ -119,7 +120,7 @@ class LidarManager:
             return self.lidar_data.copy()
 
 # ==============================================================================
-# Core Drone Control Functions
+# Core Drone Control Functions (Unchanged)
 # ==============================================================================
 def send_control_command(command):
     """Sends a 'pause' or 'resume' command to the detection script via TCP."""
@@ -140,7 +141,7 @@ def arm_and_takeoff(master, altitude):
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0)
         try:
-            master.motors_armed_wait(timeout=5)
+            master.motors_armed_wait()
             print("Motors successfully armed!")
             break
         except Exception:
@@ -160,7 +161,7 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"\rCurrent altitude: {current_altitude:.2f}m", end="")
-        if current_altitude >= altitude * 0.90:
+        if current_altitude >= altitude * 0.80:
             print("\nTarget altitude reached.")
             return True
         time.sleep(0.1)
@@ -203,59 +204,83 @@ def get_dynamic_gain(current_alt):
            ((current_alt - GAIN_MIN_ALT) / (GAIN_MAX_ALT - GAIN_MIN_ALT))
     return gain
 
+# ==============================================================================
+# --- NEW: IMPROVED PRECISION LANDING FUNCTION ---
+# ==============================================================================
 def execute_precision_landing(master, sock, target_class_id):
     """Manages precision landing on a target with reacquisition logic."""
     flush_socket_buffer(sock)
     send_control_command('resume')
     print(f"Starting precision landing sequence on target (ID: {target_class_id})...")
     
-    start_time = time.time()
+    search_start_time = time.time()
     last_detection_time = time.time()
+    last_known_alt = TAKEOFF_ALTITUDE
 
-    while time.time() - start_time < LANDING_TIMEOUT:
-        current_altitude = lidar_manager.get_distances().get('front', TAKEOFF_ALTITUDE) # Using front lidar for altitude
-        fwd_vel, right_vel, down_vel = 0, 0, 0
-        target_visible = False
+    while True:
+        if time.time() - search_start_time > LANDING_TIMEOUT:
+            print("Landing timeout reached. Aborting and hovering.")
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            return False
 
         try:
+            alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+            if alt_msg:
+                last_known_alt = alt_msg.current_distance / 100.0
+            current_altitude = last_known_alt
+
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
-            if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
-                target_visible = True
-                last_detection_time = time.time()
-                x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-                fwd_vel, right_vel = calculate_velocities(x, y, w, h)
-                horizontal_gain = get_dynamic_gain(current_altitude)
-                fwd_vel *= horizontal_gain
-                right_vel *= horizontal_gain
-                down_vel = 0.2  # Constant descent speed when target is visible
+            
+            # Check for a valid target FIRST
+            #if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
+            #    raise socket.timeout()
+
+            last_detection_time = time.time()
+            search_start_time = time.time()
+
+            x, y, area = detection["x_center"], detection["y_center"], detection["area"]
+            w, h = detection["frame_width"], detection["frame_height"]
+            
+            fwd_vel, right_vel = calculate_velocities(x, y, w, h)
+            horizontal_gain = get_dynamic_gain(current_altitude)
+            fwd_vel *= horizontal_gain
+            right_vel *= horizontal_gain
+            
+            target_area = 0.2 * (w * h)
+            area_error = 1.0 - (area / target_area) if target_area > 0 else 0
+            down_vel = TRACKING_SPEED * area_error * ALT_GAIN if abs(area_error) > 0.2 else 0
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
+            center_error_ratio = abs(x - w / 2) / w
+            print(f"LANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}")
+
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
+                print("Target centered at low altitude. Switching to LAND mode.")
+                land_normally(master)
+                time.sleep(1)
+                print("Landed. Closing gripper to pick up package.")
+                time.sleep(1)
+                servo_control.close_gripper()
+                return True
+
         except (socket.timeout, json.JSONDecodeError, KeyError):
-            pass
-
-        if not target_visible:
-            if time.time() - last_detection_time > TARGET_LOST_HOVER_DURATION:
-                down_vel = -REACQUIRE_ASCEND_SPEED # Ascend to search
+            time_since_lost = time.time() - last_detection_time
+            print(f"Searching for target ID {target_class_id}... Time since last seen: {time_since_lost:.1f}s")
+            
+            vz = 0 
+            if time_since_lost < TARGET_LOST_HOVER_DURATION:
+                print("-> Phase 1: Hovering briefly.")
             else:
-                down_vel = 0 # Hover
-        
-        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
+                print(f"-> Phase 2: Ascending to search at {REACQUIRE_ASCEND_SPEED} m/s.")
+                vz = -REACQUIRE_ASCEND_SPEED
 
-        if current_altitude < LANDING_APPROACH_ALT and target_visible:
-            print("\nTarget centered at low altitude. Switching to LAND mode.")
-            land_normally(master)
-            time.sleep(1)
-            print("Landed. Closing gripper to pick up package.")
-            servo_control.close_gripper()
-            send_control_command('pause')
-            return True
-
-        time.sleep(0.05)
-    
-    print("Landing timeout reached. Aborting precision land.")
-    send_control_command('pause')
-    return False
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
 
 def center_above_target(master, sock, target_class_id):
     """Centers the drone above a target and opens the gripper."""
@@ -264,8 +289,18 @@ def center_above_target(master, sock, target_class_id):
     print(f"Centering above target (ID: {target_class_id}) at {CENTERING_ALTITUDE}m...")
     
     start_time = time.time()
+    last_known_alt = CENTERING_ALTITUDE
+
     while time.time() - start_time < CENTERING_TIMEOUT:
-        current_alt = lidar_manager.get_distances().get('front', CENTERING_ALTITUDE)
+        # --- NEW: Read altitude from the downward-facing lidar via MAVLink ---
+        alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+        if alt_msg and alt_msg.orientation == 25:
+            current_alt = alt_msg.current_distance / 100.0
+            last_known_alt = current_alt
+        else:
+            current_alt = last_known_alt
+        # --- END NEW ---
+
         fwd_vel, right_vel, down_vel = 0, 0, 0
         target_visible = False
         
@@ -303,7 +338,7 @@ def center_above_target(master, sock, target_class_id):
     return False
 
 # ==============================================================================
-# Lidar-Guided Corridor Navigation
+# Lidar-Guided Corridor Navigation (Unchanged)
 # ==============================================================================
 def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     """
@@ -311,11 +346,25 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     - fwd_speed: Positive to move forward, negative to move backward.
     - stop_condition_func: A lambda function that takes a distances dictionary and returns True to stop.
     """
+    global has_turned_corner
     print(f"--- Entering follow_corridor (Speed: {fwd_speed} m/s) ---")
     
-    CENTERING_GAIN, TURN_THRESHOLD, WALL_GONE_THRESHOLD, TURN_YAW_RATE, TIMEOUT = 0.5, 1.0, 3.0, 0.6, 90
+    CENTERING_GAIN, TURN_THRESHOLD, WALL_GONE_THRESHOLD, TURN_YAW_RATE, TIMEOUT = 1.0, 0.8, 3.0, 0.6, 90
     start_time = time.time()
     is_turning = False
+
+    # --- FIX: WAIT FOR INITIAL SENSOR DATA ---
+    print("Waiting for initial lidar readings...")
+    while True:
+        distances = lidar_manager.get_distances()
+        # Check if essential lidars have reported a value (are not None)
+        if all(distances.get(sensor) is not None for sensor in ['front', 'left', 'right']):
+            print("Initial lidar readings received.")
+            break
+        if time.time() - start_time > 5: # 5 second timeout for getting data
+            print("Error: Timed out waiting for initial lidar data.")
+            return False
+        time.sleep(0.1)
 
     while True:
         if time.time() - start_time > TIMEOUT:
@@ -323,6 +372,15 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
             return False
 
         distances = lidar_manager.get_distances()
+
+        if any(distances.get(sensor) is None for sensor in ['front', 'left', 'right']):
+            print("\rWarning: Lost lidar data, hovering...", end="")
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            time.sleep(0.1)
+            continue
+
         if stop_condition_func(distances):
             print("\nStop condition met. Exiting follow_corridor.")
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
@@ -330,9 +388,9 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             return True
 
-        front_dist = distances.get('front', 999)
-        left_dist = distances.get('left', 999)
-        right_dist = distances.get('right', 999)
+        front_dist = distances.get('front')
+        left_dist = distances.get('left')
+        right_dist = distances.get('right')
 
         if fwd_speed > 0 and front_dist < TURN_THRESHOLD and not is_turning:
             turn_direction = None
@@ -350,6 +408,7 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
                         VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, yaw_rate, 0))
                     time.sleep(0.1)
                 print("Turn complete. Resuming forward motion.")
+                has_turned_corner = True
                 is_turning = False
                 continue
 
@@ -368,7 +427,7 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
         time.sleep(0.05)
 
 # ==============================================================================
-# Main Mission Execution
+# Main Mission Execution (Unchanged)
 # ==============================================================================
 def main():
     global data_sock, lidar_manager
@@ -390,9 +449,9 @@ def main():
         
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed initial takeoff")
         
-        # 1. Approach first logistic, stop when front lidar is <= 4m
+        # 1. Approach first logistic, stop when front lidar is <= 5m
         print("\n--- 1. Approaching first logistic ---")
-        stop_approach = lambda dists: dists.get('front', 999) <= 4.0
+        stop_approach = lambda dists: dists.get('front', 999) <= 4.7
         if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_approach): raise Exception("Failed to approach first logistic")
 
         # 2. Precision land to pick up the logistic
@@ -403,7 +462,12 @@ def main():
         print("\n--- 3. Taking off and navigating to drop-off point ---")
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after first pickup")
         stop_at_dropoff = lambda dists: dists.get('back', 0) >= 6.0
+
+        has_turned_corner = False
+
+        stop_at_dropoff = lambda dists: has_turned_corner and dists.get('back', 0) >= 6.0
         if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff): raise Exception("Failed to navigate corridor to drop-off point")
+
 
         # 4. Center and drop the first logistic on the barrel
         print("\n--- 4. Centering to drop first logistic ---")
@@ -411,7 +475,7 @@ def main():
         
         # 5. Go BACKWARD to the corner
         print("\n--- 5. Returning to corner for second logistic ---")
-        stop_at_corner = lambda dists: dists.get('front', 999) > 3.0
+        stop_at_corner = lambda dists: dists.get('back', 0) >= 1.0
         if not follow_corridor(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_corner): raise Exception("Failed to return to corner")
         
         # 6. Land and pick up the second logistic
@@ -434,7 +498,7 @@ def main():
         print("Final landing.")
         land_normally(master)
 
-        print("\n\n✅ MISSION FINISHED SUCCESSFULLY! ✅")
+        print("\nMISSION FINISHED SUCCESSFULLY!")
 
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received. Landing immediately...")
