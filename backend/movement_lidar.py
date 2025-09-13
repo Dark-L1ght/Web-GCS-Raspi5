@@ -1,5 +1,6 @@
 # ==============================================================================
 # Drone Mission Controller with Lidar Corridor Navigation & Vision Landing
+# FINAL CORRECTED VERSION WITH YAW FIX
 # ==============================================================================
 import socket
 import json
@@ -52,9 +53,15 @@ CONTROL_SERVER_PORT = 5006
 
 # --- MAVLink & ArduPilot Constants ---
 GUIDED_MODE = 4
-VELOCITY_CONTROL_BITMASK = 0b0000111111000111
-VELOCITY_CONTROL_YAW_RATE_BITMASK = 0b0000111111000011
-POSITION_CONTROL_BITMASK = 0b110111111000
+# MAVLINK BTIMASKS
+# For velocity control without yaw rate (vision-guided)
+# BITS:  (1=ignore)  YAW_RATE, YAW,      POS,       VEL,       ACCEL
+# BINARY:             1,        1,   111,111,   000,       111
+VELOCITY_CONTROL_BITMASK =        0b001111000111
+# For velocity control with yaw rate (lidar-guided)
+# BINARY:             0,        1,   111,111,   000,       111
+VELOCITY_CONTROL_YAW_RATE_BITMASK = 0b001111000111 & ~0b100000000000
+
 
 # --- Global State Variables ---
 data_sock = None
@@ -98,7 +105,6 @@ class LidarManager:
                     ser.close()
 
     def start(self):
-        """Starts the lidar reading threads."""
         print("Starting LidarManager threads...")
         for port, name in self.port_mapping.items():
             thread = threading.Thread(target=self._lidar_thread_worker, args=(port, name))
@@ -109,12 +115,10 @@ class LidarManager:
         time.sleep(1)
 
     def stop(self):
-        """Stops all lidar reading threads."""
         print("Stopping LidarManager threads...")
         self.stop_event.set()
 
     def get_distances(self):
-        """Returns a thread-safe copy of the latest lidar data."""
         with self.data_lock:
             return self.lidar_data.copy()
 
@@ -122,7 +126,6 @@ class LidarManager:
 # Core Drone Control Functions (Unchanged)
 # ==============================================================================
 def send_control_command(command):
-    """Sends a 'pause' or 'resume' command to the detection script via TCP."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((CONTROL_SERVER_IP, CONTROL_SERVER_PORT))
@@ -131,7 +134,6 @@ def send_control_command(command):
         print(f"Error sending control command: {e}")
 
 def arm_and_takeoff(master, altitude):
-    """Arms the drone and takes off to a specified altitude. Returns True on success."""
     print("Setting mode to GUIDED...")
     master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, GUIDED_MODE)
     for attempt in range(1, ARMING_RETRIES + 1):
@@ -166,7 +168,6 @@ def arm_and_takeoff(master, altitude):
         time.sleep(0.1)
 
 def land_normally(master):
-    """Commands the drone to perform a standard, non-precision landing."""
     print("Executing normal landing...")
     master.mav.command_long_send(
         master.target_system, master.target_component,
@@ -175,7 +176,6 @@ def land_normally(master):
     print("Landed and disarmed.")
 
 def flush_socket_buffer(sock):
-    """Clears any old data from the UDP socket buffer."""
     while True:
         try:
             sock.recvfrom(1024)
@@ -183,11 +183,10 @@ def flush_socket_buffer(sock):
             break
 
 # ==============================================================================
-# Vision-Guided Functions
+# Vision-Guided Functions (Unchanged)
 # ==============================================================================
 def calculate_velocities(x_center, y_center, frame_w, frame_h):
-    """Calculates horizontal velocities to track the target."""
-    corrected_x_center = frame_w - x_center # Correction for mirrored video
+    corrected_x_center = frame_w - x_center
     x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
     target_y = frame_h * VERTICAL_CENTER_RATIO
     y_offset = (y_center - target_y) / (frame_h / 2)
@@ -196,7 +195,7 @@ def calculate_velocities(x_center, y_center, frame_w, frame_h):
     return forward_vel, right_vel
 
 def get_dynamic_gain(current_alt):
-    """Calculates a dynamic gain scaling factor based on altitude."""
+    if current_alt is None: return MIN_HORIZONTAL_GAIN
     if current_alt >= GAIN_MAX_ALT: return MAX_HORIZONTAL_GAIN
     if current_alt <= GAIN_MIN_ALT: return MIN_HORIZONTAL_GAIN
     gain = MIN_HORIZONTAL_GAIN + (MAX_HORIZONTAL_GAIN - MIN_HORIZONTAL_GAIN) * \
@@ -204,7 +203,6 @@ def get_dynamic_gain(current_alt):
     return gain
 
 def execute_precision_landing(master, sock, target_class_id):
-    """Manages precision landing on a target with reacquisition logic."""
     flush_socket_buffer(sock)
     send_control_command('resume')
     print(f"Starting precision landing sequence on target (ID: {target_class_id})...")
@@ -279,7 +277,6 @@ def execute_precision_landing(master, sock, target_class_id):
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
 
 def center_above_target(master, sock, target_class_id):
-    """Centers the drone above a target and opens the gripper."""
     flush_socket_buffer(sock)
     send_control_command('resume')
     print(f"Centering above target (ID: {target_class_id}) at {CENTERING_ALTITUDE}m...")
@@ -296,13 +293,11 @@ def center_above_target(master, sock, target_class_id):
             current_alt = last_known_alt
 
         fwd_vel, right_vel, down_vel = 0, 0, 0
-        target_visible = False
         
         try:
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
-                target_visible = True
                 x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
                 fwd_vel, right_vel = calculate_velocities(x, y, w, h)
                 
@@ -359,7 +354,6 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
         distances = lidar_manager.get_distances()
         if any(distances.get(sensor) is None for sensor in ['front', 'left', 'right']):
             print("\rWarning: Lost lidar data, hovering...", end="")
-            # --- YAW FIX: Command hover with zero yaw rate ---
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -368,7 +362,6 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
 
         if stop_condition_func(distances):
             print("\nStop condition met. Exiting follow_corridor.")
-            # --- YAW FIX: Command hover with zero yaw rate ---
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -416,7 +409,7 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     return False
 
 # ==============================================================================
-# Main Mission Execution (Unchanged, but now works with yaw fix)
+# Main Mission Execution (Corrected Logic)
 # ==============================================================================
 def main():
     global data_sock, lidar_manager, has_turned_corner
@@ -504,4 +497,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
