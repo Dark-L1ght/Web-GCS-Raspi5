@@ -32,11 +32,10 @@ TARGET_LOST_HOVER_DURATION = 3.0
 REACQUIRE_ASCEND_SPEED = 0.3
 GAIN_MAX_ALT = 1.1
 GAIN_MIN_ALT = 0.4
-MAX_HORIZONTAL_GAIN = 0.4
-MIN_HORIZONTAL_GAIN = 0.1
+MAX_HORIZONTAL_GAIN = 0.5
+MIN_HORIZONTAL_GAIN = 0.2
 
 # --- Lidar & Corridor Navigation Configuration ---
-# IMPORTANT: Update these port names and mappings for your setup
 PORT_MAPPING = {
     '/dev/ttyAMA0': 'right',
     '/dev/ttyAMA1': 'left',
@@ -57,7 +56,7 @@ VELOCITY_CONTROL_BITMASK = 0b0000111111000111
 VELOCITY_CONTROL_YAW_RATE_BITMASK = 0b0000111111000011
 POSITION_CONTROL_BITMASK = 0b110111111000
 
-# --- Global Socket ---
+# --- Global State Variables ---
 data_sock = None
 has_turned_corner = False
 
@@ -204,9 +203,6 @@ def get_dynamic_gain(current_alt):
            ((current_alt - GAIN_MIN_ALT) / (GAIN_MAX_ALT - GAIN_MIN_ALT))
     return gain
 
-# ==============================================================================
-# --- NEW: IMPROVED PRECISION LANDING FUNCTION ---
-# ==============================================================================
 def execute_precision_landing(master, sock, target_class_id):
     """Manages precision landing on a target with reacquisition logic."""
     flush_socket_buffer(sock)
@@ -292,14 +288,12 @@ def center_above_target(master, sock, target_class_id):
     last_known_alt = CENTERING_ALTITUDE
 
     while time.time() - start_time < CENTERING_TIMEOUT:
-        # --- NEW: Read altitude from the downward-facing lidar via MAVLink ---
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
         if alt_msg and alt_msg.orientation == 25:
             current_alt = alt_msg.current_distance / 100.0
             last_known_alt = current_alt
         else:
             current_alt = last_known_alt
-        # --- END NEW ---
 
         fwd_vel, right_vel, down_vel = 0, 0, 0
         target_visible = False
@@ -338,14 +332,10 @@ def center_above_target(master, sock, target_class_id):
     return False
 
 # ==============================================================================
-# Lidar-Guided Corridor Navigation (Unchanged)
+# Lidar-Guided Corridor Navigation (CORRECTED FOR YAW CONTROL)
 # ==============================================================================
 def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
-    """
-    Follows a corridor until a stop condition is met, handling turns automatically.
-    - fwd_speed: Positive to move forward, negative to move backward.
-    - stop_condition_func: A lambda function that takes a distances dictionary and returns True to stop.
-    """
+    """Follows a corridor until a stop condition is met, handling turns automatically."""
     global has_turned_corner
     print(f"--- Entering follow_corridor (Speed: {fwd_speed} m/s) ---")
     
@@ -353,44 +343,38 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     start_time = time.time()
     is_turning = False
 
-    # --- FIX: WAIT FOR INITIAL SENSOR DATA ---
     print("Waiting for initial lidar readings...")
+    wait_start_time = time.time()
     while True:
         distances = lidar_manager.get_distances()
-        # Check if essential lidars have reported a value (are not None)
         if all(distances.get(sensor) is not None for sensor in ['front', 'left', 'right']):
             print("Initial lidar readings received.")
             break
-        if time.time() - start_time > 5: # 5 second timeout for getting data
+        if time.time() - wait_start_time > 5:
             print("Error: Timed out waiting for initial lidar data.")
             return False
         time.sleep(0.1)
 
-    while True:
-        if time.time() - start_time > TIMEOUT:
-            print("Corridor navigation timed out!")
-            return False
-
+    while time.time() - start_time < TIMEOUT:
         distances = lidar_manager.get_distances()
-
         if any(distances.get(sensor) is None for sensor in ['front', 'left', 'right']):
             print("\rWarning: Lost lidar data, hovering...", end="")
+            # --- YAW FIX: Command hover with zero yaw rate ---
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             time.sleep(0.1)
             continue
 
         if stop_condition_func(distances):
             print("\nStop condition met. Exiting follow_corridor.")
+            # --- YAW FIX: Command hover with zero yaw rate ---
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             return True
 
-        front_dist = distances.get('front')
-        left_dist = distances.get('left')
-        right_dist = distances.get('right')
+        front_dist, left_dist, right_dist = distances.get('front'), distances.get('left'), distances.get('right')
 
         if fwd_speed > 0 and front_dist < TURN_THRESHOLD and not is_turning:
             turn_direction = None
@@ -420,17 +404,22 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
         sys.stdout.write(f"\rFollowing... Fwd: {fwd_speed:.2f}, Right Vel: {right_vel:.2f}, Front: {front_dist:.2f}m")
         sys.stdout.flush()
 
+        # --- YAW FIX: Use bitmask that controls yaw rate and set it to 0 ---
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_speed, right_vel, 0, 0, 0, 0, 0, 0))
+            VELOCITY_CONTROL_YAW_RATE_BITMASK, # Use the yaw-controlling bitmask
+            0, 0, 0, fwd_speed, right_vel, 0, 0, 0, 0, 0, 0)) # Set yaw_rate to 0
         
         time.sleep(0.05)
+    
+    print("Corridor navigation timed out!")
+    return False
 
 # ==============================================================================
-# Main Mission Execution (Unchanged)
+# Main Mission Execution (Unchanged, but now works with yaw fix)
 # ==============================================================================
 def main():
-    global data_sock, lidar_manager
+    global data_sock, lidar_manager, has_turned_corner
     lidar_manager = LidarManager(PORT_MAPPING)
     lidar_manager.start()
 
@@ -449,52 +438,52 @@ def main():
         
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed initial takeoff")
         
-        # 1. Approach first logistic, stop when front lidar is <= 5m
+        # 1. Approach first logistic
         print("\n--- 1. Approaching first logistic ---")
         stop_approach = lambda dists: dists.get('front', 999) <= 4.7
         if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_approach): raise Exception("Failed to approach first logistic")
 
-        # 2. Precision land to pick up the logistic
+        # 2. Land and pick up logistic
         print("\n--- 2. Landing to pick up first logistic ---")
         if not execute_precision_landing(master, data_sock, 0): raise Exception("Precision land for first logistic failed")
         
-        # 3. Takeoff and navigate corridor until back lidar is >= 6m
+        # 3. Navigate to drop-off point
         print("\n--- 3. Taking off and navigating to drop-off point ---")
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after first pickup")
-        stop_at_dropoff = lambda dists: dists.get('back', 0) >= 6.0
-
+        
         has_turned_corner = False
-
         stop_at_dropoff = lambda dists: has_turned_corner and dists.get('back', 0) >= 6.0
-        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff): raise Exception("Failed to navigate corridor to drop-off point")
+        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff): raise Exception("Failed to navigate to drop-off point")
 
-
-        # 4. Center and drop the first logistic on the barrel
+        # 4. Center and drop logistic
         print("\n--- 4. Centering to drop first logistic ---")
         if not center_above_target(master, data_sock, 1): raise Exception("Centering for first drop-off failed")
         
-        # 5. Go BACKWARD to the corner
+        # 5. Return to corner for second logistic
         print("\n--- 5. Returning to corner for second logistic ---")
-        stop_at_corner = lambda dists: dists.get('back', 0) >= 1.0
+        stop_at_corner = lambda dists: dists.get('front', 999) > 3.0
         if not follow_corridor(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_corner): raise Exception("Failed to return to corner")
         
-        # 6. Land and pick up the second logistic
+        # 6. Land and pick up second logistic
         print("\n--- 6. Landing to pick up second logistic ---")
         if not execute_precision_landing(master, data_sock, 0): raise Exception("Precision land for second logistic failed")
             
-        # 7. Takeoff and go forward to the drop-off point again
+        # 7. Navigate to drop-off point again
         print("\n--- 7. Navigating to drop-off point again ---")
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after second pickup")
+        
+        has_turned_corner = False # <-- RESET FLAG FOR SECOND TRIP
         if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff): raise Exception("Failed to navigate to drop-off for second time")
             
-        # 8. Center and drop the second logistic
+        # 8. Center and drop second logistic
         print("\n--- 8. Centering to drop second logistic ---")
         if not center_above_target(master, data_sock, 1): raise Exception("Centering for second drop-off failed")
 
-        # 9. Move a bit forward and land normally
+        # 9. Move to final landing spot
         print("\n--- 9. Moving to final landing spot ---")
         stop_final = lambda dists: dists.get('front', 999) <= 2.0
-        follow_corridor(master, lidar_manager, 0.3, stop_final)
+        if not follow_corridor(master, lidar_manager, 0.3, stop_final): raise Exception("Failed final approach")
+        
         print("Final landing.")
         land_normally(master)
 
@@ -515,3 +504,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
