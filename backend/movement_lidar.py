@@ -1,16 +1,11 @@
-# ==============================================================================
-# Drone Mission Controller with Lidar Corridor Navigation & Vision Landing
-# FINAL CORRECTED VERSION WITH YAW FIX
-# ==============================================================================
 import socket
 import json
 import time
-import math
 import sys
 import threading
 import serial
 from pymavlink import mavutil
-import servo_control  # Assuming you have this file for servo control
+import servo_control  # servo_control.py
 
 # --- Drone & Mission Configuration ---
 CONNECTION_STRING = 'udp:127.0.0.1:14550'
@@ -23,7 +18,7 @@ ARMING_RETRY_DELAY = 3
 WAYPOINT_RADIUS = 0.5   # meters
 TRACKING_SPEED = 0.5    # m/s
 FWD_GAIN = 0.6
-ALT_GAIN = 0.2
+ALT_GAIN = 0.25
 VERTICAL_CENTER_RATIO = 0.25
 LANDING_APPROACH_ALT = 0.4
 LANDING_TIMEOUT = 15
@@ -33,7 +28,7 @@ TARGET_LOST_HOVER_DURATION = 3.0
 REACQUIRE_ASCEND_SPEED = 0.3
 GAIN_MAX_ALT = 1.1
 GAIN_MIN_ALT = 0.4
-MAX_HORIZONTAL_GAIN = 0.5
+MAX_HORIZONTAL_GAIN = 1.0
 MIN_HORIZONTAL_GAIN = 0.2
 
 # --- Lidar & Corridor Navigation Configuration ---
@@ -68,7 +63,7 @@ data_sock = None
 has_turned_corner = False
 
 # ==============================================================================
-# Lidar Manager Class (Unchanged)
+# Lidar Manager Class
 # ==============================================================================
 class LidarManager:
     """Manages threaded reading of multiple TFmini lidars connected to the Pi."""
@@ -123,7 +118,7 @@ class LidarManager:
             return self.lidar_data.copy()
 
 # ==============================================================================
-# Core Drone Control Functions (Unchanged)
+# Core Drone Control Functions
 # ==============================================================================
 def send_control_command(command):
     try:
@@ -183,7 +178,7 @@ def flush_socket_buffer(sock):
             break
 
 # ==============================================================================
-# Vision-Guided Functions (Unchanged)
+# Vision-Guided Functions
 # ==============================================================================
 def calculate_velocities(x_center, y_center, frame_w, frame_h):
     corrected_x_center = frame_w - x_center
@@ -327,7 +322,7 @@ def center_above_target(master, sock, target_class_id):
     return False
 
 # ==============================================================================
-# Lidar-Guided Corridor Navigation (CORRECTED FOR YAW CONTROL)
+# Lidar-Guided Corridor Navigation (CORRECTED FOR YAW DIRECTION)
 # ==============================================================================
 def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     """Follows a corridor until a stop condition is met, handling turns automatically."""
@@ -371,10 +366,20 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
 
         if fwd_speed > 0 and front_dist < TURN_THRESHOLD and not is_turning:
             turn_direction = None
-            if left_dist > WALL_GONE_THRESHOLD: turn_direction, yaw_rate = "LEFT", TURN_YAW_RATE
-            elif right_dist > WALL_GONE_THRESHOLD: turn_direction, yaw_rate = "RIGHT", -TURN_YAW_RATE
+            # A left turn requires a NEGATIVE yaw rate (counter-clockwise)
+            if left_dist > WALL_GONE_THRESHOLD: 
+                turn_direction, yaw_rate = "LEFT", -TURN_YAW_RATE 
+            # A right turn requires a POSITIVE yaw rate (clockwise)
+            elif right_dist > WALL_GONE_THRESHOLD: 
+                turn_direction, yaw_rate = "RIGHT", TURN_YAW_RATE
             
             if turn_direction:
+                print(f"\nCorner detected! Stopping to align before turn.")
+                master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                    0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                    VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                time.sleep(1.0) # Pause for 1 second to stabilize
+
                 print(f"\nCorner detected! Executing {turn_direction} turn.")
                 is_turning = True
                 turn_duration = 1.6
@@ -397,15 +402,55 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
         sys.stdout.write(f"\rFollowing... Fwd: {fwd_speed:.2f}, Right Vel: {right_vel:.2f}, Front: {front_dist:.2f}m")
         sys.stdout.flush()
 
-        # --- YAW FIX: Use bitmask that controls yaw rate and set it to 0 ---
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            VELOCITY_CONTROL_YAW_RATE_BITMASK, # Use the yaw-controlling bitmask
-            0, 0, 0, fwd_speed, right_vel, 0, 0, 0, 0, 0, 0)) # Set yaw_rate to 0
+            VELOCITY_CONTROL_YAW_RATE_BITMASK,
+            0, 0, 0, fwd_speed, right_vel, 0, 0, 0, 0, 0, 0))
         
         time.sleep(0.05)
     
     print("Corridor navigation timed out!")
+    return False
+
+def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func):
+    """
+    Flies the drone straight forward/backward without wall-centering.
+    Stops when the stop_condition_func is met. Includes a grace period.
+    """
+    print(f"--- Entering fly_straight (Speed: {fwd_speed} m/s) ---")
+    TIMEOUT = 30 
+    start_time = time.time()
+    
+    # --- NEW: Add a grace period to ensure we start moving first ---
+    GRACE_PERIOD = 2.0 # seconds
+    
+    while time.time() - start_time < TIMEOUT:
+        distances = lidar_manager.get_distances()
+        
+        # Check if the stop condition is met, but ONLY after the grace period
+        time_elapsed = time.time() - start_time
+        if time_elapsed > GRACE_PERIOD and stop_condition_func(distances):
+            print("\nStop condition met. Exiting fly_straight.")
+            # Command hover
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            return True
+
+        # Command drone to move straight with zero side velocity and zero yaw rate
+        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            VELOCITY_CONTROL_YAW_RATE_BITMASK,
+            0, 0, 0, fwd_speed, 0, 0, 0, 0, 0, 0, 0))
+        
+        status_text = f"\rFlying straight... Back Lidar: {distances.get('back', 0):.2f}m"
+        if time_elapsed <= GRACE_PERIOD:
+            status_text += " (Grace Period)"
+        sys.stdout.write(status_text)
+        sys.stdout.flush()
+        time.sleep(0.05)
+
+    print("fly_straight timed out!")
     return False
 
 # ==============================================================================
@@ -433,7 +478,7 @@ def main():
         
         # 1. Approach first logistic
         print("\n--- 1. Approaching first logistic ---")
-        stop_approach = lambda dists: dists.get('front', 999) <= 4.7
+        stop_approach = lambda dists: dists.get('front', 999) <= 4.8
         if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_approach): raise Exception("Failed to approach first logistic")
 
         # 2. Land and pick up logistic
@@ -444,9 +489,20 @@ def main():
         print("\n--- 3. Taking off and navigating to drop-off point ---")
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after first pickup")
         
+        print("--- Navigating to corridor exit ---")
         has_turned_corner = False
-        stop_at_dropoff = lambda dists: has_turned_corner and dists.get('back', 0) >= 6.0
-        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff): raise Exception("Failed to navigate to drop-off point")
+        stop_at_exit = lambda dists: has_turned_corner and dists.get('back', 0) >= 3.8
+        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_exit): 
+            raise Exception("Failed to navigate to corrdior exit")
+        
+        print("--- Corridor exited. Flying straight to drop-off point. ---")
+        # Now that we are in the open, we can't use wall-following.
+        # We will fly straight forward until the back lidar reaches the final distance.
+        # The stop condition now ONLY checks the back lidar.
+        stop_at_dropoff = lambda dists: dists.get('back', 0) >= 6.5
+        # We call a simplified navigation function for this part (see below)
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff):
+            raise Exception("Failed to fly to drop-off point in open area")
 
         # 4. Center and drop logistic
         print("\n--- 4. Centering to drop first logistic ---")
@@ -454,8 +510,20 @@ def main():
         
         # 5. Return to corner for second logistic
         print("\n--- 5. Returning to corner for second logistic ---")
-        stop_at_corner = lambda dists: dists.get('front', 999) > 3.0
-        if not follow_corridor(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_corner): raise Exception("Failed to return to corner")
+        print("--- Flying straight to re-enter corridor ---")
+        stop_at_entrance = lambda dists: dists.get('left', 999) < 2.0 and dists.get('right', 999) < 2.0
+        if not fly_straight(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_entrance):
+            raise Exception("Failed to re-enter corridor")
+        
+        print("--- Corridor entered. Navigating backward to corner ---")
+        stop_at_corner = lambda dists: dists.get('back', 999) <= 2.5 # Just before the opening on its left/right side
+        if not follow_corridor(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_corner): 
+            raise Exception("Failed to return to before corner")
+        
+        stop_at_corner = lambda dists: dists.get('back', 0) >= 1.0
+        # I build this because left/right lidar will be more than 3m because of the opening if i use follow corridor
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff):
+            raise Exception("Failed to fly to corner")
         
         # 6. Land and pick up second logistic
         print("\n--- 6. Landing to pick up second logistic ---")
@@ -464,9 +532,21 @@ def main():
         # 7. Navigate to drop-off point again
         print("\n--- 7. Navigating to drop-off point again ---")
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after second pickup")
-        
-        has_turned_corner = False # <-- RESET FLAG FOR SECOND TRIP
-        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff): raise Exception("Failed to navigate to drop-off for second time")
+
+        get_out_from_corner = lambda dists: dists.get('back', 0) >= 2.5
+        # I build this because left/right lidar will be more than 3m because of the opening if i use follow corridor
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, get_out_from_corner):
+            raise Exception("Failed to fly to drop-off point in open area")
+
+        print("--- Navigating to corridor exit (second trip) ---")
+        stop_at_exit = lambda dists: dists.get('back', 0) >= 4.0
+        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_exit): 
+            raise Exception("Failed to navigate to corridor exit (second trip)")
+            
+        print("--- Corridor exited. Flying straight to drop-off point (second trip) ---")
+        stop_at_dropoff = lambda dists: dists.get('back', 0) >= 6.5
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff):
+            raise Exception("Failed to fly to drop-off point (second trip)")
             
         # 8. Center and drop second logistic
         print("\n--- 8. Centering to drop second logistic ---")
