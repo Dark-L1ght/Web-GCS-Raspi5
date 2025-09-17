@@ -83,9 +83,6 @@ if __name__ == '__main__':
         setup()
         while True:
             open_gripper()
-            time.sleep(2)
-            close_gripper()
-            time.sleep(2)
     except KeyboardInterrupt:
         print("\nProgram interrupted.")
     finally:
