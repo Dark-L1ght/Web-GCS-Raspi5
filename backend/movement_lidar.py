@@ -204,7 +204,7 @@ def get_dynamic_gain(current_alt):
 def execute_precision_landing(master, sock, target_class_id):
     flush_socket_buffer(sock)
     send_control_command('resume')
-    print(f"Starting precision landing sequence on target (ID: {target_class_id})...")
+    print(f"Starting precision landing sequence (Accepting IDs: [0, 1])...")
     
     search_start_time = time.time()
     last_detection_time = time.time()
@@ -227,7 +227,9 @@ def execute_precision_landing(master, sock, target_class_id):
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             
-            if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
+            # Accept class ID 0 or 1 for landing
+            detected_id = detection.get("class_id")
+            if detection.get("state") != "TRACKING" or detected_id not in [0, 1]:
                 raise socket.timeout()
 
             last_detection_time = time.time()
@@ -248,7 +250,8 @@ def execute_precision_landing(master, sock, target_class_id):
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
             center_error_ratio = abs(x - w / 2) / (w/2)
-            print(f"\rLANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
+            # Show the actual detected ID in the status message
+            print(f"\rLANDING (Detected {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
 
 
             if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.2:
@@ -262,7 +265,7 @@ def execute_precision_landing(master, sock, target_class_id):
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
             time_since_lost = time.time() - last_detection_time
-            print(f"\rSearching for target ID {target_class_id}... Time since last seen: {time_since_lost:.1f}s", end="")
+            print(f"\rSearching for landing target (IDs [0, 1])... Time since last seen: {time_since_lost:.1f}s", end="")
             
             vz = 0 
             if time_since_lost > TARGET_LOST_HOVER_DURATION:
