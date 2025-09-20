@@ -1,5 +1,5 @@
 {
-    "detection_threshold": 0.2,
+    "detection_threshold": 0.4,
     "max_boxes":200,
     "labels": [
       "unlabeled",
