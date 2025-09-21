@@ -303,8 +303,8 @@ def center_above_target(master, sock, target_class_id):
                 alt_error = CENTERING_ALTITUDE - current_alt
                 down_vel = -ALT_GAIN * alt_error
                 
-                center_error_ratio = abs(w/2 - (w-x)) / w
-                if center_error_ratio < 0.05 and abs(alt_error) < 0.10:
+                center_error_ratio = abs(x - w / 2) / (w/2)
+                if center_error_ratio < 0.1 and abs(alt_error) < 0.10:
                     print("\nTarget centered. Opening gripper to drop package.")
                     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                         0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,

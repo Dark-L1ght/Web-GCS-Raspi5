@@ -274,10 +274,9 @@ def get_dynamic_gain(current_alt):
     return gain
 
 def execute_precision_landing(master, sock, target_class_id):
-    """Manages precision landing on a target with reacquisition logic."""
     flush_socket_buffer(sock)
     send_control_command('resume')
-    print(f"Starting precision landing sequence on target (ID: {target_class_id})...")
+    print(f"Starting precision landing sequence (Accepting IDs: [0, 1])...")
     
     search_start_time = time.time()
     last_detection_time = time.time()
@@ -293,19 +292,20 @@ def execute_precision_landing(master, sock, target_class_id):
 
         try:
             alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
-            if alt_msg:
+            if alt_msg and alt_msg.orientation == 25: # Downward facing
                 last_known_alt = alt_msg.current_distance / 100.0
             current_altitude = last_known_alt
 
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             
-            # Check for a valid target FIRST
-            #if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
-            #    raise socket.timeout()
+            # Accept class ID 0 or 1 for landing
+            detected_id = detection.get("class_id")
+            if detection.get("state") != "TRACKING" or detected_id not in [0, 1]:
+                raise socket.timeout()
 
             last_detection_time = time.time()
-            search_start_time = time.time()
+            search_start_time = time.time() # Reset timeout on successful detection
 
             x, y, area = detection["x_center"], detection["y_center"], detection["area"]
             w, h = detection["frame_width"], detection["frame_height"]
@@ -321,17 +321,30 @@ def execute_precision_landing(master, sock, target_class_id):
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
-            center_error_ratio = abs(x - w / 2) / w
-            print(f"LANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}")
+            center_error_ratio = abs(x - w / 2) / (w/2)
+            # Show the actual detected ID in the status message
+            print(f"\rLANDING (Detected {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
 
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
-                print("Target centered at low altitude. Switching to LAND mode.")
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.175:
+                print("\nTarget centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
                 time.sleep(1)
                 print("Landed. Closing gripper to pick up package.")
                 time.sleep(1)
                 servo_control.close_gripper()
                 return True
+
+        except (socket.timeout, json.JSONDecodeError, KeyError):
+            time_since_lost = time.time() - last_detection_time
+            print(f"\rSearching for landing target (IDs [0, 1])... Time since last seen: {time_since_lost:.1f}s", end="")
+            
+            vz = 0 
+            if time_since_lost > TARGET_LOST_HOVER_DURATION:
+                vz = -REACQUIRE_ASCEND_SPEED
+
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
             time_since_lost = time.time() - last_detection_time

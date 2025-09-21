@@ -235,14 +235,6 @@ def change_altitude(master, target_alt, timeout=10):
     print("\nAltitude change timed out.")
     return False
 
-
-def flush_socket_buffer(sock):
-    while True:
-        try:
-            sock.recvfrom(1024)
-        except socket.timeout:
-            break
-        
 # ==============================================================================
 # Vision-Guided Functions
 # ==============================================================================
@@ -368,7 +360,7 @@ def center_above_target(master, sock, target_class_id):
                 alt_error = CENTERING_ALTITUDE - current_alt
                 down_vel = -ALT_GAIN * alt_error
                 
-                center_error_ratio = abs(w/2 - (w-x)) / w
+                center_error_ratio = abs(x - w / 2) / (w/2)
                 sys.stdout.write(f"\rCentering... Err: {center_error_ratio:.2%}, Alt Err: {alt_error:+.2f}m, Fwd: {fwd_vel:.2f}, Right: {right_vel:.2f}")
                 sys.stdout.flush()
 
