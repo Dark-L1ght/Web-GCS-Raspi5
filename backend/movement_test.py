@@ -365,7 +365,7 @@ def center_above_target(master, sock, target_class_id):
                 sys.stdout.flush()
 
                 # --- MODIFIED EXIT LOGIC ---
-                if center_error_ratio < 0.05 and abs(alt_error) < 0.10:
+                if center_error_ratio < 0.1 and abs(alt_error) < 0.10:
                     print("\nTarget centered. Halting movement to stabilize...")
                     # 1. Command the drone to hover to stop all movement
                     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
@@ -373,7 +373,7 @@ def center_above_target(master, sock, target_class_id):
                         VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                     
                     # 2. Wait for 1 second to allow inertia to dissipate
-                    time.sleep(1.0) 
+                    time.sleep(0.5) 
                     
                     # 3. Now that it's stable, open the gripper
                     print("Drone stable. Opening gripper to drop package.")
@@ -500,7 +500,7 @@ def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func, target_a
     while not initial_reading_ok:
         distances = lidar_manager.get_distances()
         # Use a relevant sensor based on direction of travel
-        check_sensor = 'back' if fwd_speed > 0 else 'front' 
+        check_sensor = 'front' if fwd_speed > 0 else 'back' 
         dist = distances.get(check_sensor)
         if dist is not None and dist < 50.0:
             print(f"Initial lidar reading received: {dist:.2f}m")
@@ -533,11 +533,13 @@ def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func, target_a
         
         # --- LIDAR DATA VALIDATION ---
         if front_dist is None or front_dist > 50.0:
-            print("\rWarning: Lost or invalid lidar data, continuing with last command...", end="")
-            # We still send a command to maintain altitude if needed
+            print("\rWarning: Lost lidar data, hovering for safety...", end="")
+            # Command a hover (0 horizontal velocity)
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, fwd_speed, 0, down_vel, 0, 0, 0, 0, 0))
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 
+                0, 0, down_vel,  # Stop forward motion, but maintain altitude
+                0, 0, 0, 0, 0))
             time.sleep(0.1)
             continue
         
@@ -612,7 +614,7 @@ def main():
         # 4. Move to final landing spot
         print("\n--- 4. Moving to final landing spot ---")
         stop_final = lambda dists: dists.get('front', 999) <= 2.0
-        if not follow_corridor(master, lidar_manager, 0.3, stop_final): raise Exception("Failed final approach")
+        if not fly_straight(master, lidar_manager, 0.3, stop_final): raise Exception("Failed final approach")
         
         print("Final landing.")
         land_normally(master)
