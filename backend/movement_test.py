@@ -4,6 +4,7 @@ import time
 import sys
 import threading
 import serial
+import math
 from pymavlink import mavutil
 import servo_control  # servo_control.py
 
@@ -58,10 +59,99 @@ VELOCITY_CONTROL_BITMASK =        0b001111000111
 # BINARY:             0,        1,   111,111,   000,       111
 VELOCITY_CONTROL_YAW_RATE_BITMASK = 0b001111000111 & ~0b100000000000
 
-
 # --- Global State Variables ---
 data_sock = None
 has_turned_corner = False
+
+def get_current_heading(master):
+    """
+    Gets the current heading of the drone in radians from the ATTITUDE message.
+    Returns None if the message isn't received.
+    """
+    msg = master.recv_match(type='ATTITUDE', blocking=True, timeout=1)
+    if msg:
+        return msg.yaw  # Yaw in radians (-pi to +pi)
+    return None
+
+def get_angle_difference(angle1_rad, angle2_rad):
+    """
+    Calculates the shortest difference between two angles in radians.
+    The result is in the range [-pi, pi].
+    """
+    diff = angle2_rad - angle1_rad
+    # Normalize the difference to be within -pi to pi
+    while diff <= -math.pi:
+        diff += 2 * math.pi
+    while diff > math.pi:
+        diff -= 2 * math.pi
+    return diff
+
+def turn_drone_by_heading(master, angle_degrees, yaw_rate_rads, tolerance_rad=0.1):
+    """
+    Turns the drone by a specific angle based on its heading.
+
+    :param master: The pymavlink connection.
+    :param angle_degrees: The angle to turn in degrees (+ for clockwise/right, - for counter-clockwise/left).
+    :param yaw_rate_rads: The speed of the turn in radians/second.
+    :param tolerance_rad: How close to the target heading we need to be to stop (in radians).
+    :return: True if the turn was successful, False otherwise.
+    """
+    print(f"\n--- Executing {angle_degrees}° turn ---")
+    
+    # Get the starting heading
+    start_heading_rad = get_current_heading(master)
+    if start_heading_rad is None:
+        print("Error: Could not get initial heading.")
+        return False
+
+    # Calculate the target heading and ensure it's in the range [-pi, pi]
+    target_heading_rad = start_heading_rad + math.radians(angle_degrees)
+    target_heading_rad = (target_heading_rad + math.pi) % (2 * math.pi) - math.pi
+
+    print(f"Start: {math.degrees(start_heading_rad):.1f}°, Target: {math.degrees(target_heading_rad):.1f}°")
+
+    # Determine direction for yaw rate (+ or -)
+    turn_yaw_rate = math.copysign(yaw_rate_rads, angle_degrees)
+
+    start_time = time.time()
+    TURN_TIMEOUT = 10 # 10 second timeout for safety
+
+    while time.time() - start_time < TURN_TIMEOUT:
+        current_heading_rad = get_current_heading(master)
+        if current_heading_rad is None:
+            # If we lose attitude data, hover for safety
+            print("Warning: Lost heading data, hovering.")
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            time.sleep(0.1)
+            continue
+
+        # Check if we have reached the target
+        remaining_angle_rad = get_angle_difference(current_heading_rad, target_heading_rad)
+        
+        sys.stdout.write(f"\rTurning... Current: {math.degrees(current_heading_rad):.1f}°, Remaining: {math.degrees(remaining_angle_rad):.1f}°")
+        sys.stdout.flush()
+
+        if abs(remaining_angle_rad) < tolerance_rad:
+            print("\nTurn complete. Target heading reached. ✅")
+            # Send a final command to stop rotation
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            time.sleep(0.5) # Allow drone to stabilize
+            return True
+
+        # Send the turn command
+        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            VELOCITY_CONTROL_YAW_RATE_BITMASK,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, turn_yaw_rate, 0))
+        
+        time.sleep(0.05)
+
+    print("\nError: Turn timed out.")
+    return False
 
 # ==============================================================================
 # Lidar Manager Class
@@ -452,19 +542,24 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
                     VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                 time.sleep(1.0) 
 
-                print(f"Executing {turn_direction} turn.")
-                is_turning = True
-                turn_duration = 1.6
-                turn_start = time.time()
-                while time.time() - turn_start < turn_duration:
-                    master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                        0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                        VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, yaw_rate, 0))
-                    time.sleep(0.1)
-                print("Turn complete. Resuming forward motion.")
+            is_turning = True # Prevent re-triggering the turn
+              
+            # Set turn angle based on direction
+            turn_angle_deg = 90.0 if turn_direction == "RIGHT" else -90.0
+              
+            # Convert your TURN_YAW_RATE constant to radians
+            # Your constant was 0.15 rad/s, which is a bit slow. Let's use something faster.
+            turn_speed_rads = math.radians(30) # Turn at 30 degrees/sec
+              
+            if turn_drone_by_heading(master, turn_angle_deg, turn_speed_rads):
                 has_turned_corner = True
-                is_turning = False
-                continue
+            else:
+                print("Turn failed! Aborting corridor follow.")
+                # You might want to land or hover here
+                return False
+
+            is_turning = False
+            continue # Resume corridor following
 
         if left_dist > 5 or right_dist > 5: centering_error = 0
         else: centering_error = left_dist - right_dist
