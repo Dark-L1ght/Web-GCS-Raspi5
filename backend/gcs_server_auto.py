@@ -140,8 +140,8 @@ async def handler(websocket):
                 # ========================================================== #
                 # --- THIS IS THE MODIFIED SECTION ---                       #
                 # ========================================================== #
-                if action == 'start_auto_mission':
-                    print("Received 'start_auto_mission' command from web client.")
+                if action == 'start_mission':
+                    print("Received 'start_mission' command from web client.")
 
                     # IMPORTANT: Update this path to be the correct one on your drone
                     script_path = '/home/kingphoenix/path/to/your/run_auto.sh'

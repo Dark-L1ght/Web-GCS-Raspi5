@@ -21,6 +21,7 @@ ARMING_RETRY_DELAY = 3
 GUIDED_MODE = 4
 
 # --- Vision & Landing Configuration ---
+TRACKING_SPEED = 0.5    # Base speed for horizontal correction during landing
 CENTERING_SPEED = 0.25      # m/s, horizontal speed for fine-tuning position over a target.
 FWD_GAIN = 0.8              # Proportional gain for forward velocity based on vertical target offset.
 ALT_GAIN = 0.15             # Proportional gain for vertical velocity.
@@ -32,7 +33,7 @@ CENTERING_ALTITUDE = 1.0    # Target altitude for centering/dropping.
 TARGET_LOST_HOVER_DURATION = 3.0 # Time to wait before ascending to reacquire a lost target.
 REACQUIRE_ASCEND_SPEED = 0.3     # Speed at which to ascend to reacquire target.
 
-# --- Dynamic Gain for Vision Control (adjusts horizontal speed based on altitude) ---
+# --- Dynamic Gain for Vision Control ---
 GAIN_MAX_ALT = 1.1          # Altitude at which horizontal gain is maximum.
 GAIN_MIN_ALT = 0.4          # Altitude at which horizontal gain is minimum.
 MAX_HORIZONTAL_GAIN = 0.5
@@ -64,7 +65,6 @@ VELOCITY_CONTROL_BITMASK =        0b001111000111
 # BINARY:             0,        1,   111,111,   000,       111
 VELOCITY_CONTROL_YAW_RATE_BITMASK = 0b001111000111 & ~0b100000000000
 
-
 # --- Global State Variables ---
 data_sock = None
 has_turned_corner = False
@@ -88,7 +88,6 @@ class LidarManager:
             try:
                 ser = serial.Serial(port_name, 115200, timeout=0.5)
                 while not self.stop_event.is_set():
-                    # TFmini-S frame format: 0x59 0x59 Dist_L Dist_H ... Checksum
                     if ser.in_waiting >= 9 and ser.read(1) == b'\x59' and ser.read(1) == b'\x59':
                         frame = ser.read(7)
                         checksum = (0x59 + 0x59 + sum(frame[:6])) & 0xFF
@@ -111,13 +110,14 @@ class LidarManager:
             self.threads.append(thread)
             thread.start()
         print("All lidar threads started.")
-        time.sleep(1) # Give threads time to initialize
+        time.sleep(1)
 
+    # UPDATED: Replaced with test version for a graceful shutdown.
     def stop(self):
         print("Stopping LidarManager threads...")
         self.stop_event.set()
         for thread in self.threads:
-            thread.join()
+            thread.join() # Wait for threads to finish cleanly
 
     def get_distances(self):
         with self.data_lock:
@@ -158,7 +158,6 @@ def arm_and_takeoff(master, altitude):
     master.mav.command_long_send(
         master.target_system, master.target_component,
         mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, altitude)
-    # Wait until the drone reaches target altitude
     while True:
         msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=5)
         if not msg:
@@ -181,10 +180,9 @@ def land_normally(master):
         master.motors_disarmed_wait(timeout=30)
         print("Landed and disarmed.")
     except Exception as e:
-        print(f"Warning: Did not receive disarm confirmation, but landing was commanded. {e}")
+        print(f"Warning: Did not receive disarm confirmation. {e}")
 
 def flush_socket_buffer(sock):
-    """Clears any old data from the UDP socket buffer."""
     while True:
         try:
             sock.recvfrom(1024)
@@ -194,38 +192,38 @@ def flush_socket_buffer(sock):
 # ==============================================================================
 # --- Vision-Guided Functions ---
 # ==============================================================================
+
+# UPDATED: Replaced with test version to handle mirrored camera video feeds.
 def calculate_velocities(x_center, y_center, frame_w, frame_h, speed):
     """Calculates forward and right velocities based on target position and a given speed."""
-    # Correct for camera inversion if necessary. Assuming standard coordinates (0,0 top-left).
-    # A target to the right of center (x_center > w/2) should result in a positive right_vel.
-    # A target below the desired vertical point should result in a positive forward_vel.
-    x_offset = (x_center - frame_w / 2) / (frame_w / 2)
+    # This logic corrects for a horizontally flipped video stream
+    corrected_x_center = frame_w - x_center
+    x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
+    
     target_y = frame_h * VERTICAL_CENTER_RATIO
     y_offset = (y_center - target_y) / (frame_h / 2)
-
-    # Deadband to prevent oscillation from minor noise
+    
     right_vel = speed * x_offset if abs(x_offset) > 0.1 else 0
-    forward_vel = speed * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
+    # The negative sign correctly maps "target is below center" to "move forward"
+    forward_vel = -speed * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
     return forward_vel, right_vel
 
 def get_dynamic_gain(current_alt):
-    """Calculates a horizontal speed gain based on altitude for smoother control."""
     if current_alt is None: return MIN_HORIZONTAL_GAIN
     if current_alt >= GAIN_MAX_ALT: return MAX_HORIZONTAL_GAIN
     if current_alt <= GAIN_MIN_ALT: return MIN_HORIZONTAL_GAIN
-
     gain_range = MAX_HORIZONTAL_GAIN - MIN_HORIZONTAL_GAIN
     alt_range = GAIN_MAX_ALT - GAIN_MIN_ALT
     gain = MIN_HORIZONTAL_GAIN + gain_range * ((current_alt - GAIN_MIN_ALT) / alt_range)
     return gain
 
-def execute_precision_landing(master, sock, target_class_id):
-    """Executes a vision-guided landing sequence over a specified target ID."""
+# UPDATED: Replaced with test version for consistency and simpler logic.
+def execute_precision_landing(master, sock):
     flush_socket_buffer(sock)
     send_control_command('resume')
-    print(f"Starting precision landing sequence (Accepting ID: {target_class_id})...")
-
-    # BUG FIX: Set the overall timeout start time ONCE.
+    print(f"Starting precision landing sequence (Accepting IDs: [0, 1])...")
+    
+    # CORRECTED: Set the overall timeout start time ONCE.
     search_start_time = time.time()
     last_detection_time = time.time()
     last_known_alt = TAKEOFF_ALTITUDE
@@ -239,32 +237,32 @@ def execute_precision_landing(master, sock, target_class_id):
 
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
-
-            # Ensure we are tracking the correct target for this landing
-            if detection.get("state") != "TRACKING" or detection.get("class_id") != target_class_id:
-                raise socket.timeout() # Treat non-target detections as "not found"
+            
+            detected_id = detection.get("class_id")
+            if detection.get("state") != "TRACKING" or detected_id not in [0, 1]:
+                raise socket.timeout # Treat non-target detections as "not found"
 
             last_detection_time = time.time()
 
-            x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-
-            # Use a base speed and apply dynamic gain for horizontal movements
-            fwd_vel, right_vel = calculate_velocities(x, y, w, h, 1.0) # Base speed of 1.0
+            x, y = detection["x_center"], detection["y_center"]
+            w, h = detection["frame_width"], detection["frame_height"]
+            
+            # Use TRACKING_SPEED for descent, let dynamic gain control horizontal
+            fwd_vel, right_vel = calculate_velocities(x, y, w, h, TRACKING_SPEED)
             horizontal_gain = get_dynamic_gain(current_altitude)
             fwd_vel *= horizontal_gain
             right_vel *= horizontal_gain
-
-            # Use a slow, constant descent when the target is visible
-            down_vel = 0.2
+            
+            # Simple proportional descent towards the target
+            down_vel = 0.2 # Slow, constant descent when target is visible
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
-
+            
             center_error_ratio = abs(x - w / 2) / (w/2)
-            print(f"\rLANDING (ID {target_class_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
+            print(f"\rLANDING (ID {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
 
-            # Check for landing conditions
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.175:
                 print("\nTarget centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
                 time.sleep(1)
@@ -275,7 +273,7 @@ def execute_precision_landing(master, sock, target_class_id):
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
             time_since_lost = time.time() - last_detection_time
-            print(f"\rSearching for landing target (ID {target_class_id})... Time since last seen: {time_since_lost:.1f}s", end="")
+            print(f"\rSearching for landing target... Time since last seen: {time_since_lost:.1f}s", end="")
 
             vz = 0
             if time_since_lost > TARGET_LOST_HOVER_DURATION:
@@ -291,29 +289,30 @@ def execute_precision_landing(master, sock, target_class_id):
         VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     return False
 
+# UPDATED: Replaced with test version for clearer, more robust logic.
 def center_above_target(master, sock, target_class_id):
-    """Centers the drone over a target at a specific altitude, then opens the gripper."""
     flush_socket_buffer(sock)
     send_control_command('resume')
     print(f"Centering above target (ID: {target_class_id}) at {CENTERING_ALTITUDE}m...")
-
+    
     start_time = time.time()
     last_known_alt = CENTERING_ALTITUDE
 
     while time.time() - start_time < CENTERING_TIMEOUT:
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
-        current_alt = last_known_alt
         if alt_msg and alt_msg.orientation == 25:
             current_alt = alt_msg.current_distance / 100.0
             last_known_alt = current_alt
-        
+        else:
+            current_alt = last_known_alt
+
         fwd_vel, right_vel = 0, 0
+
         try:
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
                 x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-                # Use the slower CENTERING_SPEED for fine adjustments
                 fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED)
 
                 center_error_ratio = abs(x - w / 2) / (w/2)
@@ -321,28 +320,24 @@ def center_above_target(master, sock, target_class_id):
                 sys.stdout.write(f"\rCentering... Err: {center_error_ratio:.2%}, Alt Err: {alt_error:+.2f}m")
                 sys.stdout.flush()
 
-                if center_error_ratio < 0.08 and abs(alt_error) < 0.10:
-                    print("\nTarget centered. Stabilizing for drop...")
-                    # Command a hover to stop all movement
+                if center_error_ratio < 0.1 and abs(alt_error) < 0.1:
+                    print("\nTarget centered. Stabilizing...")
                     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                         0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                         VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-                    time.sleep(1.0) # Wait for inertia to dissipate
                     
-                    print("Drone stable. Opening gripper to drop package.")
+                    time.sleep(1.0)
+                    
+                    print("Opening gripper.")
                     servo_control.open_gripper()
-                    time.sleep(1.0) # Wait for package to drop clear
+                    time.sleep(1.0)
                     send_control_command('pause')
                     return True
-            else:
-                 raise socket.timeout() # Not the right target, treat as not found
         except (socket.timeout, json.JSONDecodeError, KeyError):
-            # LOGIC IMPROVEMENT: If target is lost, actively command a hover.
-            fwd_vel, right_vel = 0, 0
             print("\rSearching for drop-off target...", end="")
-
+        # Altitude control is handled outside the try/except for continuous adjustment
         alt_error = CENTERING_ALTITUDE - current_alt
-        down_vel = -ALT_GAIN * alt_error if abs(alt_error) > 0.05 else 0
+        down_vel = -ALT_GAIN * alt_error
 
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
@@ -358,44 +353,50 @@ def center_above_target(master, sock, target_class_id):
 # ==============================================================================
 
 def get_current_heading(master):
-    """Gets the current heading of the drone in radians from the ATTITUDE message."""
     msg = master.recv_match(type='ATTITUDE', blocking=True, timeout=1)
-    if msg:
-        return msg.yaw
-    return None
+    return msg.yaw if msg else None
 
 def get_angle_difference(angle1_rad, angle2_rad):
-    """Calculates the shortest difference between two angles in radians."""
     diff = angle2_rad - angle1_rad
     while diff <= -math.pi: diff += 2 * math.pi
     while diff > math.pi: diff -= 2 * math.pi
     return diff
 
-def turn_drone_by_heading(master, angle_degrees, turn_speed_rads=math.radians(30), tolerance_rad=0.1):
-    """Turns the drone by a specific angle based on its IMU heading."""
+# UPDATED: Replaced with safer, more robust test version.
+def turn_drone_by_heading(master, angle_degrees, yaw_rate_rads=math.radians(30), tolerance_rad=0.1):
+    print(f"\n--- Executing {angle_degrees}° turn ---")
+    
     start_heading_rad = get_current_heading(master)
     if start_heading_rad is None:
-        print("Error: Could not get initial heading for turn.")
+        print("Error: Could not get initial heading.")
         return False
 
     target_heading_rad = start_heading_rad + math.radians(angle_degrees)
-    turn_yaw_rate = math.copysign(turn_speed_rads, angle_degrees)
-    
-    print(f"Executing turn: Start {math.degrees(start_heading_rad):.1f}°, Target {math.degrees(target_heading_rad):.1f}°")
-    
+    target_heading_rad = (target_heading_rad + math.pi) % (2 * math.pi) - math.pi
+
+    print(f"Start: {math.degrees(start_heading_rad):.1f}°, Target: {math.degrees(target_heading_rad):.1f}°")
+
+    turn_yaw_rate = math.copysign(yaw_rate_rads, angle_degrees)
     start_time = time.time()
     TURN_TIMEOUT = 10
-    
+
     while time.time() - start_time < TURN_TIMEOUT:
         current_heading_rad = get_current_heading(master)
         if current_heading_rad is None:
+            print("Warning: Lost heading data, hovering.")
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             time.sleep(0.1)
             continue
 
-        remaining_angle = get_angle_difference(current_heading_rad, target_heading_rad)
-        if abs(remaining_angle) < tolerance_rad:
+        remaining_angle_rad = get_angle_difference(current_heading_rad, target_heading_rad)
+        
+        sys.stdout.write(f"\rTurning... Remaining: {math.degrees(remaining_angle_rad):.1f}°")
+        sys.stdout.flush()
+
+        if abs(remaining_angle_rad) < tolerance_rad:
             print("\nTurn complete.")
-            # Send a final command to stop rotation
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -406,15 +407,13 @@ def turn_drone_by_heading(master, angle_degrees, turn_speed_rads=math.radians(30
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
             VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, turn_yaw_rate, 0))
         
-        sys.stdout.write(f"\rTurning... Remaining: {math.degrees(remaining_angle):.1f}°")
-        sys.stdout.flush()
         time.sleep(0.05)
-        
-    print("\nTurn timed out.")
+
+    print("\nError: Turn timed out.")
     return False
 
+# UPDATED: Replaced with test version for consistency.
 def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
-    """Follows a corridor until a stop condition is met, handling turns automatically."""
     global has_turned_corner
     print(f"--- Entering follow_corridor (Speed: {fwd_speed} m/s) ---")
     
@@ -422,11 +421,14 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     start_time = time.time()
     is_turning = False
 
-    # Wait for valid initial sensor readings before moving
+    wait_start_time = time.time()
     while True:
         distances = lidar_manager.get_distances()
-        if all(distances.get(s) is not None for s in ['front', 'left', 'right']): break
-        if time.time() - start_time > 5:
+        check_sensors = ['left', 'right']
+        check_sensors.append('front' if fwd_speed >= 0 else 'back')
+        if all(distances.get(s) is not None for s in check_sensors):
+            break
+        if time.time() - wait_start_time > 5:
             print("Error: Timed out waiting for initial lidar data.")
             return False
         time.sleep(0.1)
@@ -434,7 +436,6 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     while time.time() - start_time < TIMEOUT:
         distances = lidar_manager.get_distances()
         if any(d is None for d in [distances.get('front'), distances.get('left'), distances.get('right')]):
-            print("\rWarning: Lost critical lidar data, hovering...", end="")
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -442,38 +443,34 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
             continue
 
         if stop_condition_func(distances):
-            print("\nStop condition met. Exiting follow_corridor.")
+            print("\nStop condition met. Exiting corridor.")
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             return True
 
         front_dist, left_dist, right_dist = distances['front'], distances['left'], distances['right']
-
-        # --- BUG FIX & ROBUSTNESS IMPROVEMENT: Heading-based turn logic ---
+        
         if fwd_speed > 0 and front_dist < TURN_THRESHOLD and not is_turning:
             turn_direction = None
             if left_dist > WALL_GONE_THRESHOLD: turn_direction = "LEFT"
             elif right_dist > WALL_GONE_THRESHOLD: turn_direction = "RIGHT"
             
             if turn_direction:
-                print(f"\nObstacle detected. Aligning before {turn_direction} turn.")
+                print(f"\nObstacle ahead. Turning {turn_direction}.")
                 master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                     0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                     VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                 time.sleep(1.0)
-
                 is_turning = True
                 turn_angle_deg = -90.0 if turn_direction == "LEFT" else 90.0
                 if turn_drone_by_heading(master, turn_angle_deg):
                     has_turned_corner = True
                 else:
-                    print("Turn failed! Aborting corridor follow.")
                     return False
                 is_turning = False
                 continue
-
-        # Wall Following Logic
+        
         centering_error = left_dist - right_dist if not (left_dist > 5 or right_dist > 5) else 0
         right_vel = -CENTERING_GAIN * centering_error
         
@@ -488,50 +485,35 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
     print("\nCorridor navigation timed out!")
     return False
 
+# UPDATED: Replaced with safer test version that fixes altitude control bug.
 def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func, target_altitude=None):
-    """Flies the drone straight using lidar for guidance, with optional altitude control."""
-    print(f"--- Entering fly_straight (Speed: {fwd_speed} m/s, Target Alt: {target_altitude or 'N/A'}) ---")
+    print(f"--- Flying straight (Speed: {fwd_speed} m/s) ---")
     TIMEOUT = 30
     start_time = time.time()
-    last_known_alt = TAKEOFF_ALTITUDE
+    last_known_alt = -1 # Use -1 to indicate we need the first reading
 
-    # BUG FIX: Correctly check 'front' when moving forward, 'back' when reversing.
     check_sensor = 'front' if fwd_speed >= 0 else 'back'
-    print(f"Waiting for initial reading from '{check_sensor}' lidar...")
     wait_start_time = time.time()
     while True:
+        # Get initial altitude before moving
+        if last_known_alt == -1:
+            alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1)
+            if alt_msg and alt_msg.orientation == 25:
+                last_known_alt = alt_msg.current_distance / 100.0
+        
         dist = lidar_manager.get_distances().get(check_sensor)
-        if dist is not None and dist < 50.0:
-            print(f"Initial lidar reading received: {dist:.2f}m")
+        if dist is not None and last_known_alt != -1:
+            print(f"Initial readings received: {check_sensor.capitalize()} {dist:.2f}m, Alt {last_known_alt:.2f}m")
             break
         if time.time() - wait_start_time > 5:
-            print("Error: Timed out waiting for initial lidar data.")
+            print("Error: Timed out waiting for initial sensor data.")
             return False
         time.sleep(0.1)
 
     while time.time() - start_time < TIMEOUT:
         distances = lidar_manager.get_distances()
         
-        # Determine current distance based on direction
-        current_dist = distances.get('front') if fwd_speed >= 0 else distances.get('back')
-
-        # Safety hover on lost lidar data
-        if current_dist is None or current_dist > 50.0:
-            print(f"\rWarning: Lost {check_sensor} lidar, hovering for safety...", end="")
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-            time.sleep(0.1)
-            continue
-        
-        if stop_condition_func(distances):
-            print("\nStop condition met. Exiting fly_straight.")
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-            return True
-
-        # Altitude control logic
+        # Altitude control logic runs continuously
         down_vel = 0
         if target_altitude is not None:
             alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.01)
@@ -542,6 +524,24 @@ def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func, target_a
             alt_error = target_altitude - current_alt
             if abs(alt_error) > 0.05: 
                 down_vel = -ALT_GAIN * alt_error
+        
+        current_dist = distances.get(check_sensor)
+        
+        if current_dist is None:
+            print(f"\rWarning: Lost {check_sensor} lidar, hovering...", end="")
+            # BUG FIX: Maintain altitude control even when hovering
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, down_vel, 0, 0, 0, 0, 0))
+            time.sleep(0.1)
+            continue
+        
+        if stop_condition_func(distances):
+            print("\nStop condition met.")
+            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            return True
 
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
@@ -555,7 +555,7 @@ def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func, target_a
     return False
 
 # ==============================================================================
-# Main Mission Execution (Corrected Logic)
+# Main Mission Execution
 # ==============================================================================
 def main():
     global data_sock, lidar_manager, has_turned_corner
@@ -575,12 +575,12 @@ def main():
         servo_control.open_gripper()
         send_control_command('pause')
         
-        if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed initial takeoff")
+        if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Initial takeoff failed")
         
         # 1. Approach first logistic
         print("\n--- 1. Approaching first logistic ---")
-        stop_approach = lambda dists: dists.get('front', 999) <= 4.7
-        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_approach): raise Exception("Failed to approach first logistic")
+        first_logistic = lambda dists: dists.get('front', 999) <= 4.7
+        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, first_logistic): raise Exception("Failed to approach first logistic")
 
         # 2. Land and pick up logistic
         print("\n--- 2. Landing to pick up first logistic ---")
@@ -590,75 +590,64 @@ def main():
         print("\n--- 3. Taking off and navigating to drop-off point ---")
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after first pickup")
         
-        
         print("--- Navigating to corridor exit ---")
         has_turned_corner = False
-        stop_at_exit = lambda dists: has_turned_corner and (3.8 <= dists.get('back', 0) < 12.0)
+        stop_at_exit = lambda dists: has_turned_corner and (dists.get('back', 0) >= 3.8)
         if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_exit): 
-            raise Exception("Failed to navigate to corrdior exit")
+            raise Exception("Failed to navigate corridor exit")
         
         print("\n--- Corridor exited. Flying straight to drop-off point. ---")
-        stop_at_dropoff = lambda dists: 6.5 <= dists.get('back', 0) < 12.0
-        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff, target_altitude=0.8):
-            raise Exception("Failed to fly to drop-off point in open area")
+        stop_at_dropoff = lambda dists: dists.get('front', 99) <= 4.0
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff):
+            raise Exception("Failed to fly to drop-off point")
 
-        # 4. Center and drop logistic
-        print("\n--- 4. Centering to drop first logistic ---")
-        if not center_above_target(master, data_sock, 1): raise Exception("Centering for first drop-off failed")
+        # 4. Center and drop
+        print("\n--- 4. Centering for drop-off ---")
+        if not center_above_target(master, data_sock, 1): raise Exception("Centering for drop-off failed")
         
-        # 5. Return to corner for second logistic
-        print("\n--- 5. Returning to corner for second logistic ---")
-        print("--- Flying straight to re-enter corridor ---")
+        # 5. Return to corner
+        print("\n--- 5. Returning for second logistic ---")
         stop_at_entrance = lambda dists: dists.get('left', 999) < 2.0 and dists.get('right', 999) < 2.0
-        if not fly_straight(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_entrance):
-            raise Exception("Failed to re-enter corridor")
+        if not fly_straight(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_entrance): raise Exception("Return to corridor failed")
         
-        print("\n--- Corridor entered. Navigating backward to corner ---")
+        print("\n--- Navigating back to corner ---")
         stop_at_corner = lambda dists: dists.get('back', 999) <= 2.5
-        if not follow_corridor(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_corner): 
-            raise Exception("Failed to return to before corner")
+        if not follow_corridor(master, lidar_manager, -CORRIDOR_FWD_SPEED, stop_at_corner): raise Exception("Return to corner failed")
         
-        # Corrected this logic block
         print("\n--- Aligning for second pickup ---")
         stop_near_pickup = lambda dists: dists.get('front', 999) <= 1.0 
-        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_near_pickup):
-            raise Exception("Failed to fly to corner for second pickup")
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_near_pickup): raise Exception("Final alignment for pickup failed")
         
         # 6. Land and pick up second logistic
-        print("\n--- 6. Landing to pick up second logistic ---")
-        if not execute_precision_landing(master, data_sock, 0): raise Exception("Precision land for second logistic failed")
-            
-        # 7. Navigate to drop-off point again
-        print("\n--- 7. Navigating to drop-off point again ---")
-        if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Failed takeoff after second pickup")
+        print("\n--- 6. Landing for second logistic ---")
+        if not execute_precision_landing(master, data_sock, 0): raise Exception("Second precision land failed")
+        
+        # 7. Navigate to drop-off again
+        print("\n--- 7. Taking off for second delivery ---")
+        if not arm_and_takeoff(master, TAKEOFF_ALTITUDE): raise Exception("Takeoff after second pickup failed")
 
         get_out_from_corner = lambda dists: dists.get('back', 0) >= 2.5
-        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, get_out_from_corner):
-            raise Exception("Failed to fly out from corner area")
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, get_out_from_corner): raise Exception("Failed to exit corner")
 
-        print("\n--- Navigating to corridor exit (second trip) ---")
-        # Re-use stop_at_exit from before
-        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_exit): 
-            raise Exception("Failed to navigate to corridor exit (second trip)")
-            
-        print("\n--- Corridor exited. Flying straight to drop-off point (second trip) ---")
-        # Re-use stop_at_dropoff from before
-        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff, target_altitude=0.8):
-            raise Exception("Failed to fly to drop-off point (second trip)")
-            
+        print("\n--- Navigating corridor exit (second trip) ---")
+        if not follow_corridor(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_exit): raise Exception("Second corridor navigation failed")
+        
+        print("\n--- Flying to drop-off point (second trip) ---")
+        if not fly_straight(master, lidar_manager, CORRIDOR_FWD_SPEED, stop_at_dropoff, target_altitude=0.8): raise Exception("Second flight to drop-off failed")
+        
         # 8. Center and drop second logistic
-        print("\n--- 8. Centering to drop second logistic ---")
-        if not center_above_target(master, data_sock, 1): raise Exception("Centering for second drop-off failed")
+        print("\n--- 8. Centering for second drop-off ---")
+        if not center_above_target(master, data_sock, 1): raise Exception("Second centering for drop-off failed")
 
         # 9. Move to final landing spot
         print("\n--- 9. Moving to final landing spot ---")
         stop_final = lambda dists: dists.get('front', 999) <= 2.0
-        if not follow_corridor(master, lidar_manager, 0.3, stop_final): raise Exception("Failed final approach")
+        # BUG FIX: Use fly_straight for the final approach, not follow_corridor
+        if not fly_straight(master, lidar_manager, 0.3, stop_final): raise Exception("Final approach failed")
         
         print("Final landing.")
         land_normally(master)
-
-        print("\nMISSION FINISHED SUCCESSFULLY!")
+        print("\nMISSION COMPLETE!")
 
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received. Landing immediately...")
