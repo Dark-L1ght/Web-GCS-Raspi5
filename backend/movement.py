@@ -9,7 +9,7 @@ import servo_control
 # --- Drone & Mission Configuration ---
 CONNECTION_STRING = 'udp:127.0.0.1:14550'
 BAUD_RATE = 921600
-TAKEOFF_ALTITUDE = 1  # meters
+TAKEOFF_ALTITUDE = 1.1  # meters
 ARMING_RETRIES = 3      # Number of times to attempt arming
 ARMING_RETRY_DELAY = 3  # Seconds to wait between arming attempts
 WAYPOINT_RADIUS = 0.5   # meters
@@ -23,7 +23,7 @@ ALT_GAIN = 0.3
 # This MUST match the value in video_streamer.py
 # 0.5 = geometric center of the frame.
 # 0.75 = 75% of the way down the frame (for a forward-mounted camera).
-VERTICAL_CENTER_RATIO = 0.25
+VERTICAL_CENTER_RATIO = 0.15
 
 LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
 LANDING_TIMEOUT = 15 # seconds to search before aborting landing
@@ -104,7 +104,7 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"\rCurrent altitude: {current_altitude:.2f}m", end="")
-        if current_altitude >= altitude * 0.80:
+        if current_altitude >= altitude * 0.90:
             print("\nTarget altitude reached.")
             return True
         time.sleep(0.1)
@@ -173,23 +173,22 @@ def flush_socket_buffer(sock):
         except socket.timeout:
             break
 
-# UPDATED: Replaced with lidar version for more robust logic and a stabilization pause.
-def center_above_target(master, sock, target_class_id):
+# UPDATED: Modified to only perform horizontal centering at a given altitude.
+def center_above_target(master, sock, target_class_id, target_alt):
     flush_socket_buffer(sock)
     send_control_command('resume')
-    print(f"Centering above target (ID: {target_class_id}) at {CENTERING_ALTITUDE}m...")
+    # CHANGED: Uses the passed-in target_alt for the status message.
+    print(f"Centering above target (ID: {target_class_id}) at {target_alt}m...")
     
     start_time = time.time()
-    last_known_alt = CENTERING_ALTITUDE
-
+    
     while time.time() - start_time < CENTERING_TIMEOUT:
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+        current_alt = -1 # Default value if no sensor data
         if alt_msg and alt_msg.orientation == 25:
             current_alt = alt_msg.current_distance / 100.0
-            last_known_alt = current_alt
-        else:
-            current_alt = last_known_alt
-
+            
+        # Initialize velocities. down_vel will remain 0.
         fwd_vel, right_vel, down_vel = 0, 0, 0
         
         try:
@@ -197,34 +196,34 @@ def center_above_target(master, sock, target_class_id):
             detection = json.loads(data.decode())
             if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
                 x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-                # Use CENTERING_SPEED for fine-tuned movements
+                # Horizontal control remains the same
                 fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED)
 
-                alt_error = CENTERING_ALTITUDE - current_alt
-                down_vel = -ALT_GAIN * alt_error
-                
+                # REMOVED: Altitude error and down_vel calculations are gone.
+
                 center_error_ratio = abs(x - w / 2) / (w/2)
-                sys.stdout.write(f"\rCentering... Err: {center_error_ratio:.2%}, Alt Err: {alt_error:+.2f}m")
+                # CHANGED: Updated status message to show current altitude without error.
+                sys.stdout.write(f"\rCentering... Err: {center_error_ratio:.2%}, Current Alt: {current_alt:.2f}m")
                 sys.stdout.flush()
 
-                if center_error_ratio < 0.1 and abs(alt_error) < 0.1:
+                # CHANGED: Success condition now only checks for horizontal centering.
+                if center_error_ratio < 0.05:
                     print("\nTarget centered. Stabilizing for drop...")
-                    # Command drone to hover before dropping
                     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                         0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                         VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                     
-                    time.sleep(0.5) # Wait for inertia to dissipate
+                    time.sleep(1)
                     
                     print("Drone stable. Opening gripper to drop package.")
                     servo_control.open_gripper()
-                    time.sleep(1.0) # Wait for package to drop clear
+                    time.sleep(1.0)
                     send_control_command('pause')
                     return True
         except (socket.timeout, json.JSONDecodeError, KeyError):
-            # If target is lost, just hover. The original script's active search is not used here.
             print("\rSearching for drop-off target...", end="")
 
+        # Send MAVLink command with down_vel forced to 0
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
             VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -284,7 +283,7 @@ def execute_precision_landing(master, sock):
             right_vel *= horizontal_gain
             
             # Simple proportional descent towards the target
-            down_vel = 0.2 # Slow, constant descent when target is visible
+            down_vel = 0.175 # Slow, constant descent when target is visible
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -292,7 +291,7 @@ def execute_precision_landing(master, sock):
             center_error_ratio = abs(x - w / 2) / (w/2)
             print(f"\rLANDING (ID {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
 
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.175:
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
                 print("\nTarget centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
                 time.sleep(1)
@@ -373,7 +372,7 @@ def main():
         # --- Mission 2: Takeoff, fly to WP3 and Center on Target 1 ---
         print("\n--- MISSION 2: Center over Target at Waypoint 3 Barrel (Target ID 1) ---")
         navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
-        center_above_target(master, sock=data_sock, target_class_id=1)
+        center_above_target(master, sock=data_sock, target_class_id=1, target_alt=WAYPOINTS[2][2])
 
         # --- Mission 3: Fly to WP2 and Precision Land on Target 0 ---
         print("\n--- MISSION 3: Precision Land at Waypoint 2 (Target ID 0) ---")
@@ -387,7 +386,7 @@ def main():
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
             raise Exception("Failed to takeoff for Mission 5. Aborting mission.")
         navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
-        center_above_target(master, sock=data_sock, target_class_id=1)
+        center_above_target(master, sock=data_sock, target_class_id=1, target_alt=WAYPOINTS[2][2])
 
         # --- Mission 5: Fly to WP4 and Land ---
         print("\n--- MISSION 5: Final Landing at Waypoint 4 ---")
