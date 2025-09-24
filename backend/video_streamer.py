@@ -30,7 +30,7 @@ SERVER_PORT = 5001
 # Adjust this value to change the vertical position of the "true center".
 # 0.5 = geometric center of the frame.
 # 0.75 = 75% of the way down the frame (for a forward-mounted camera).
-VERTICAL_CENTER_RATIO = 0.15
+VERTICAL_CENTER_RATIO = 0.10
 # --- END NEW ---
 
 # --- FLASK SETUP (unchanged) ---

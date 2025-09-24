@@ -14,19 +14,16 @@ ARMING_RETRIES = 3      # Number of times to attempt arming
 ARMING_RETRY_DELAY = 3  # Seconds to wait between arming attempts
 WAYPOINT_RADIUS = 0.5   # meters
 TRACKING_SPEED = 0.5    # m/s
-# ADDED from lidar code for the new center_above_target function
 CENTERING_SPEED = 0.25  # m/s, horizontal speed for fine-tuning position
 FWD_GAIN = 0.6
 ALT_GAIN = 0.3
 
 # CAMERA CENTER OFFSET
-# This MUST match the value in video_streamer.py
-# 0.5 = geometric center of the frame.
-# 0.75 = 75% of the way down the frame (for a forward-mounted camera).
-VERTICAL_CENTER_RATIO = 0.15
+VERTICAL_CENTER_RATIO = 0.10
 
 LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
 LANDING_TIMEOUT = 15 # seconds to search before aborting landing
+FORCED_LAND_ALTITUDE = 0.30 # NEW: Altitude to force landing regardless of target visibility
 
 CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
 CENTERING_ALTITUDE = 0.75 # meters, altitude to hold when centering
@@ -74,7 +71,6 @@ def send_control_command(command):
     except Exception as e:
         print(f"Error sending control command: {e}")
 
-# UPDATED: Replaced with the lidar version for cleaner status printing and more robust logic.
 def arm_and_takeoff(master, altitude):
     print("Setting mode to GUIDED...")
     master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, GUIDED_MODE)
@@ -104,12 +100,11 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"\rCurrent altitude: {current_altitude:.2f}m", end="")
-        if current_altitude >= altitude * 0.90:
+        if current_altitude >= altitude * 0.80:
             print("\nTarget altitude reached.")
             return True
         time.sleep(0.1)
 
-# UPDATED: Replaced with lidar version for more robust error handling.
 def land_normally(master):
     """Commands the drone to perform a standard, non-precision landing."""
     print("Executing normal landing...")
@@ -148,23 +143,18 @@ def navigate_to_waypoint(master, lat, lon, alt):
         time.sleep(0.1)
     time.sleep(2)
 
-# UPDATED: Replaced with the more flexible lidar version that accepts a `speed` parameter.
 def calculate_velocities(x_center, y_center, frame_w, frame_h, speed):
     """Calculates forward and right velocities based on target position and a given speed."""
-    # --- FIX FOR MIRRORED VIDEO ---
     corrected_x_center = frame_w - x_center
     x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
 
-    # --- OFF_CENTER LOGIC ---
     target_y = frame_h * VERTICAL_CENTER_RATIO
     y_offset = (y_center - target_y) / (frame_h / 2)
     
-    # Use the passed 'speed' parameter instead of a global constant
     right_vel = speed * x_offset if abs(x_offset) > 0.1 else 0
     forward_vel = -speed * y_offset * FWD_GAIN if abs(y_offset) > 0.1 else 0
     return forward_vel, right_vel
 
-# UPDATED: Replaced with lidar version which is identical but silent.
 def flush_socket_buffer(sock):
     """Clears any old data from the UDP socket buffer."""
     while True:
@@ -173,11 +163,9 @@ def flush_socket_buffer(sock):
         except socket.timeout:
             break
 
-# UPDATED: Modified to only perform horizontal centering at a given altitude.
 def center_above_target(master, sock, target_class_id, target_alt):
     flush_socket_buffer(sock)
     send_control_command('resume')
-    # CHANGED: Uses the passed-in target_alt for the status message.
     print(f"Centering above target (ID: {target_class_id}) at {target_alt}m...")
     
     start_time = time.time()
@@ -188,7 +176,6 @@ def center_above_target(master, sock, target_class_id, target_alt):
         if alt_msg and alt_msg.orientation == 25:
             current_alt = alt_msg.current_distance / 100.0
             
-        # Initialize velocities. down_vel will remain 0.
         fwd_vel, right_vel, down_vel = 0, 0, 0
         
         try:
@@ -196,17 +183,12 @@ def center_above_target(master, sock, target_class_id, target_alt):
             detection = json.loads(data.decode())
             if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
                 x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-                # Horizontal control remains the same
                 fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED)
 
-                # REMOVED: Altitude error and down_vel calculations are gone.
-
                 center_error_ratio = abs(x - w / 2) / (w/2)
-                # CHANGED: Updated status message to show current altitude without error.
                 sys.stdout.write(f"\rCentering... Err: {center_error_ratio:.2%}, Current Alt: {current_alt:.2f}m")
                 sys.stdout.flush()
 
-                # CHANGED: Success condition now only checks for horizontal centering.
                 if center_error_ratio < 0.05:
                     print("\nTarget centered. Stabilizing for drop...")
                     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
@@ -223,7 +205,6 @@ def center_above_target(master, sock, target_class_id, target_alt):
         except (socket.timeout, json.JSONDecodeError, KeyError):
             print("\rSearching for drop-off target...", end="")
 
-        # Send MAVLink command with down_vel forced to 0
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
             VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -233,10 +214,9 @@ def center_above_target(master, sock, target_class_id, target_alt):
     send_control_command('pause')
     return False
 
-# UPDATED: Replaced with lidar version for safer handling of null altitude data.
 def get_dynamic_gain(current_alt):
     """Calculates a dynamic gain scaling factor based on altitude."""
-    if current_alt is None: return MIN_HORIZONTAL_GAIN # Safety check
+    if current_alt is None: return MIN_HORIZONTAL_GAIN
     if current_alt >= GAIN_MAX_ALT: return MAX_HORIZONTAL_GAIN
     if current_alt <= GAIN_MIN_ALT: return MIN_HORIZONTAL_GAIN
     
@@ -245,7 +225,7 @@ def get_dynamic_gain(current_alt):
     gain = MIN_HORIZONTAL_GAIN + gain_range * ((current_alt - GAIN_MIN_ALT) / alt_range)
     return gain
 
-# UPDATED: Replaced with lidar version for safer timeout logic and simpler descent control.
+# UPDATED: Added a low-altitude safety check to force landing.
 def execute_precision_landing(master, sock):
     flush_socket_buffer(sock)
     send_control_command('resume')
@@ -255,35 +235,42 @@ def execute_precision_landing(master, sock):
     last_detection_time = time.time()
     last_known_alt = TAKEOFF_ALTITUDE
 
-    # Note: Using LANDING_TIMEOUT from the legacy config
     while time.time() - search_start_time < LANDING_TIMEOUT:
-        try:
-            alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
-            if alt_msg and alt_msg.orientation == 25: # Downward facing
-                last_known_alt = alt_msg.current_distance / 100.0
-            current_altitude = last_known_alt
+        # --- Get current altitude first on every loop iteration ---
+        alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+        if alt_msg and alt_msg.orientation == 25:
+            last_known_alt = alt_msg.current_distance / 100.0
+        current_altitude = last_known_alt
+        
+        # --- NEW: Safety check for forced landing ---
+        if current_altitude < FORCED_LAND_ALTITUDE:
+            print(f"\nAltitude is below {FORCED_LAND_ALTITUDE}m. Forcing immediate landing.")
+            land_normally(master)
+            # Perform post-landing actions
+            time.sleep(1)
+            print("Landed. Closing gripper to pick up package.")
+            time.sleep(1)
+            servo_control.close_gripper()
+            return True # Exit the function
 
+        try:
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             
             detected_id = detection.get("class_id")
-            # We accept target_class_id 0 or 1 for any landing maneuver as per original logic
             if detection.get("state") != "TRACKING" or detected_id not in [0, 1]:
                 raise socket.timeout
 
             last_detection_time = time.time()
-
             x, y = detection["x_center"], detection["y_center"]
             w, h = detection["frame_width"], detection["frame_height"]
             
-            # Use TRACKING_SPEED for descent, let dynamic gain control horizontal movement
             fwd_vel, right_vel = calculate_velocities(x, y, w, h, TRACKING_SPEED)
             horizontal_gain = get_dynamic_gain(current_altitude)
             fwd_vel *= horizontal_gain
             right_vel *= horizontal_gain
             
-            # Simple proportional descent towards the target
-            down_vel = 0.175 # Slow, constant descent when target is visible
+            down_vel = 0.1 # Slow, constant descent when target is visible
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -303,11 +290,9 @@ def execute_precision_landing(master, sock):
         except (socket.timeout, json.JSONDecodeError, KeyError):
             time_since_lost = time.time() - last_detection_time
             print(f"\rSearching for landing target... Time since last seen: {time_since_lost:.1f}s", end="")
-            
             vz = 0 
             if time_since_lost > TARGET_LOST_HOVER_DURATION:
-                vz = -REACQUIRE_ASCEND_SPEED # Ascend to find target again
-
+                vz = -REACQUIRE_ASCEND_SPEED
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
