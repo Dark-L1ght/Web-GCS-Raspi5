@@ -9,7 +9,7 @@ SERVO_RIGHT_CHANNEL = 1
 
 # --- Gripper Angle Configuration ---
 # Both servos will move to the same angle values.
-GRIPPER_OPEN_ANGLE = 35
+GRIPPER_OPEN_ANGLE = 20
 GRIPPER_CLOSE_ANGLE = 140
 
 # --- Global Variables ---

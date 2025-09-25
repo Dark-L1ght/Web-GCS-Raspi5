@@ -17,24 +17,30 @@ TRACKING_SPEED = 0.5    # m/s
 CENTERING_SPEED = 0.25  # m/s, horizontal speed for fine-tuning position
 FWD_GAIN = 0.6
 ALT_GAIN = 0.3
+BLIND_FORWARD_SPEED = 0.2
 
 # CAMERA CENTER OFFSET
 VERTICAL_CENTER_RATIO = 0.10
 
+# --- CAMERA CENTER OFFSET ---
+# We now have two different vertical goal lines for different maneuvers.
+LANDING_VERTICAL_RATIO = 0.10  # Aggressive (high on screen) for the final landing approach.
+CENTERING_VERTICAL_RATIO = 0.25 # Less aggressive (more central) for dropping on the barrel.
+
 LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
-LANDING_TIMEOUT = 15 # seconds to search before aborting landing
-FORCED_LAND_ALTITUDE = 0.30 # NEW: Altitude to force landing regardless of target visibility
+LANDING_TIMEOUT = 30 # seconds to search before aborting landing
+FORCED_LAND_ALTITUDE = 0.5 # NEW: Altitude to force landing regardless of target visibility
 
 CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
-CENTERING_ALTITUDE = 0.75 # meters, altitude to hold when centering
+CENTERING_TARGET_AREA_RATIO = 0.1  # e.g., 3% of the total frame area. Tune this value!
 
 TARGET_LOST_HOVER_DURATION = 3.0  # Seconds to hover before starting active search
 REACQUIRE_ASCEND_SPEED = 0.3      # m/s for the search ascent
 
-GAIN_MAX_ALT = 1.1  # Altitude (m) at which the gain is 1.0 (full speed)
+GAIN_MAX_ALT = 1  # Altitude (m) at which the gain is 1.0 (full speed)
 GAIN_MIN_ALT = 0.4  # Altitude (m) at which the gain is at its minimum
-MAX_HORIZONTAL_GAIN = 0.4 # The gain at or above GAIN_MAX_ALT
-MIN_HORIZONTAL_GAIN = 0.1 # The minimum gain at or below GAIN_MIN_ALT
+MAX_HORIZONTAL_GAIN = 0.6 # The gain at or above GAIN_MAX_ALT
+MIN_HORIZONTAL_GAIN = 0.2 # The minimum gain at or below GAIN_MIN_ALT
 
 # --- UDP Network Configuration ---
 UDP_RECEIVE_IP = "127.0.0.2"
@@ -143,12 +149,14 @@ def navigate_to_waypoint(master, lat, lon, alt):
         time.sleep(0.1)
     time.sleep(2)
 
-def calculate_velocities(x_center, y_center, frame_w, frame_h, speed):
+# UPDATED: Now accepts a vertical_ratio to handle different maneuvers.
+def calculate_velocities(x_center, y_center, frame_w, frame_h, speed, vertical_ratio):
     """Calculates forward and right velocities based on target position and a given speed."""
     corrected_x_center = frame_w - x_center
     x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
 
-    target_y = frame_h * VERTICAL_CENTER_RATIO
+    # Use the passed-in vertical_ratio instead of the global constant
+    target_y = frame_h * vertical_ratio
     y_offset = (y_center - target_y) / (frame_h / 2)
     
     right_vel = speed * x_offset if abs(x_offset) > 0.1 else 0
@@ -172,7 +180,7 @@ def center_above_target(master, sock, target_class_id, target_alt):
     
     while time.time() - start_time < CENTERING_TIMEOUT:
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
-        current_alt = -1 # Default value if no sensor data
+        current_alt = -1
         if alt_msg and alt_msg.orientation == 25:
             current_alt = alt_msg.current_distance / 100.0
             
@@ -183,19 +191,33 @@ def center_above_target(master, sock, target_class_id, target_alt):
             detection = json.loads(data.decode())
             if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
                 x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-                fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED)
+                current_area = detection["area"]
+                
+                target_pixel_area = w * h * CENTERING_TARGET_AREA_RATIO
+                fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED, CENTERING_VERTICAL_RATIO)
+
 
                 center_error_ratio = abs(x - w / 2) / (w/2)
-                sys.stdout.write(f"\rCentering... Err: {center_error_ratio:.2%}, Current Alt: {current_alt:.2f}m")
+                area_progress_ratio = current_area / target_pixel_area
+                                
+                sys.stdout.write(
+                    f"\rCentering... Pos Err: {center_error_ratio:.1%}, "
+                    f"Area Prog: {min(area_progress_ratio, 1.0):.1%}, "
+                    f"Alt: {current_alt:.2f}m"
+                )
                 sys.stdout.flush()
 
-                if center_error_ratio < 0.05:
-                    print("\nTarget centered. Stabilizing for drop...")
+                # --- UPDATED: Success condition now checks all three criteria ---
+                is_horizontally_centered = center_error_ratio < 0.1
+                is_close_enough = current_area >= target_pixel_area
+
+                if is_horizontally_centered and is_close_enough:
+                    print("\nTarget fully centered and close. Stabilizing for drop...")
                     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                         0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                         VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
                     
-                    time.sleep(1)
+                    time.sleep(1.0)
                     
                     print("Drone stable. Opening gripper to drop package.")
                     servo_control.open_gripper()
@@ -203,6 +225,7 @@ def center_above_target(master, sock, target_class_id, target_alt):
                     send_control_command('pause')
                     return True
         except (socket.timeout, json.JSONDecodeError, KeyError):
+            fwd_vel, right_vel = 0, 0
             print("\rSearching for drop-off target...", end="")
 
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
@@ -225,7 +248,7 @@ def get_dynamic_gain(current_alt):
     gain = MIN_HORIZONTAL_GAIN + gain_range * ((current_alt - GAIN_MIN_ALT) / alt_range)
     return gain
 
-# UPDATED: Added a low-altitude safety check to force landing.
+# UPDATED: Implemented a combined "ascend and forward" search pattern when the target is lost.
 def execute_precision_landing(master, sock):
     flush_socket_buffer(sock)
     send_control_command('resume')
@@ -236,24 +259,23 @@ def execute_precision_landing(master, sock):
     last_known_alt = TAKEOFF_ALTITUDE
 
     while time.time() - search_start_time < LANDING_TIMEOUT:
-        # --- Get current altitude first on every loop iteration ---
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
         if alt_msg and alt_msg.orientation == 25:
             last_known_alt = alt_msg.current_distance / 100.0
         current_altitude = last_known_alt
         
-        # --- NEW: Safety check for forced landing ---
+        # Safety check for forced landing remains
         if current_altitude < FORCED_LAND_ALTITUDE:
             print(f"\nAltitude is below {FORCED_LAND_ALTITUDE}m. Forcing immediate landing.")
             land_normally(master)
-            # Perform post-landing actions
             time.sleep(1)
             print("Landed. Closing gripper to pick up package.")
             time.sleep(1)
             servo_control.close_gripper()
-            return True # Exit the function
+            return True
 
         try:
+            # --- This part runs when the target is VISIBLE ---
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             
@@ -261,16 +283,15 @@ def execute_precision_landing(master, sock):
             if detection.get("state") != "TRACKING" or detected_id not in [0, 1]:
                 raise socket.timeout
 
-            last_detection_time = time.time()
-            x, y = detection["x_center"], detection["y_center"]
-            w, h = detection["frame_width"], detection["frame_height"]
+            last_detection_time = time.time() # Update time whenever target is seen
+            x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
             
-            fwd_vel, right_vel = calculate_velocities(x, y, w, h, TRACKING_SPEED)
+            fwd_vel, right_vel = calculate_velocities(x, y, w, h, TRACKING_SPEED, LANDING_VERTICAL_RATIO)
             horizontal_gain = get_dynamic_gain(current_altitude)
             fwd_vel *= horizontal_gain
             right_vel *= horizontal_gain
             
-            down_vel = 0.1 # Slow, constant descent when target is visible
+            down_vel = 0.15 # Continue slow descent
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -278,7 +299,7 @@ def execute_precision_landing(master, sock):
             center_error_ratio = abs(x - w / 2) / (w/2)
             print(f"\rLANDING (ID {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
 
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.15:
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.10:
                 print("\nTarget centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
                 time.sleep(1)
@@ -288,14 +309,25 @@ def execute_precision_landing(master, sock):
                 return True
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
+            # --- This part runs when the target is LOST ---
             time_since_lost = time.time() - last_detection_time
-            print(f"\rSearching for landing target... Time since last seen: {time_since_lost:.1f}s", end="")
-            vz = 0 
-            if time_since_lost > TARGET_LOST_HOVER_DURATION:
-                vz = -REACQUIRE_ASCEND_SPEED
+            
+            # Initialize velocities for search
+            vx, vy, vz = 0, 0, 0
+            
+            if time_since_lost < TARGET_LOST_HOVER_DURATION:
+                # Phase 1: Just hover for the first few seconds
+                print(f"\rTarget lost. Hovering... (Time since last seen: {time_since_lost:.1f}s)", end="")
+            else:
+                # Phase 2: Ascend and push forward simultaneously
+                vz = -REACQUIRE_ASCEND_SPEED  # Negative Z is UP
+                vx = BLIND_FORWARD_SPEED     # Positive X is FORWARD
+                print(f"\rSearching... Ascending and moving forward. (Time since last seen: {time_since_lost:.1f}s)", end="")
+            
+            # Send the search command
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, vz, 0, 0, 0, 0, 0))
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, vx, vy, vz, 0, 0, 0, 0, 0))
 
     print("\nLanding timeout reached. Aborting and hovering.")
     master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
@@ -384,6 +416,8 @@ def main():
     except KeyboardInterrupt:
         print("Keyboard interrupt received. Landing immediately...")
         land_normally(master)
+        servo_control.open_gripper()
+
     finally:
         servo_control.cleanup()
         if data_sock: data_sock.close()
