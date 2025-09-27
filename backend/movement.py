@@ -16,31 +16,30 @@ WAYPOINT_RADIUS = 0.5   # meters
 TRACKING_SPEED = 0.5    # m/s
 CENTERING_SPEED = 0.25  # m/s, horizontal speed for fine-tuning position
 FWD_GAIN = 0.6
-ALT_GAIN = 0.3
 BLIND_FORWARD_SPEED = 0.2
 
 # CAMERA CENTER OFFSET
-VERTICAL_CENTER_RATIO = 0.10
+LANDING_VERTICAL_RATIO = 0.10
+CENTERING_VERTICAL_RATIO = 0.25
 
-# --- CAMERA CENTER OFFSET ---
-# We now have two different vertical goal lines for different maneuvers.
-LANDING_VERTICAL_RATIO = 0.10  # Aggressive (high on screen) for the final landing approach.
-CENTERING_VERTICAL_RATIO = 0.25 # Less aggressive (more central) for dropping on the barrel.
+LANDING_APPROACH_ALT = 0.5
+LANDING_TIMEOUT = 30
+FORCED_LAND_ALTITUDE = 0.5
 
-LANDING_APPROACH_ALT = 0.5 # meters, altitude to trigger final LAND command
-LANDING_TIMEOUT = 30 # seconds to search before aborting landing
-FORCED_LAND_ALTITUDE = 0.5 # NEW: Altitude to force landing regardless of target visibility
+CENTERING_TIMEOUT = 20
+CENTERING_TARGET_AREA_RATIO = 0.1
+CENTERING_CONFIRMATION_DURATION = 1.5
 
-CENTERING_TIMEOUT = 20 # seconds to search before aborting centering
-CENTERING_TARGET_AREA_RATIO = 0.1  # e.g., 3% of the total frame area. Tune this value!
+TARGET_LOST_HOVER_DURATION = 2.5
+REACQUIRE_ASCEND_SPEED = 0.3
 
-TARGET_LOST_HOVER_DURATION = 3.0  # Seconds to hover before starting active search
-REACQUIRE_ASCEND_SPEED = 0.3      # m/s for the search ascent
+# --- NEW: Configuration for Window Approach ---
+ALTITUDE_CHECK_TOLERANCE = 0.3 # meters. Fails if GPS alt is off by more than this.
 
-GAIN_MAX_ALT = 1  # Altitude (m) at which the gain is 1.0 (full speed)
-GAIN_MIN_ALT = 0.4  # Altitude (m) at which the gain is at its minimum
-MAX_HORIZONTAL_GAIN = 0.6 # The gain at or above GAIN_MAX_ALT
-MIN_HORIZONTAL_GAIN = 0.2 # The minimum gain at or below GAIN_MIN_ALT
+GAIN_MAX_ALT = 1
+GAIN_MIN_ALT = 0.4
+MAX_HORIZONTAL_GAIN = 0.6
+MIN_HORIZONTAL_GAIN = 0.2
 
 # --- UDP Network Configuration ---
 UDP_RECEIVE_IP = "127.0.0.2"
@@ -53,12 +52,14 @@ GUIDED_MODE = 4
 VELOCITY_CONTROL_BITMASK = 0b0000111111000111
 POSITION_CONTROL_BITMASK = 0b110111111000
 
-# --- Mission Waypoints ---
+# --- UPDATED: Mission Waypoints ---
 WAYPOINTS = [
-    (-7.8332912, 110.3842767, 2.5), # Waypoint 1 (Precision Land on Logistics - ID 0)
-    (-7.8333110, 110.3842802, 2.5), # Waypoint 2 (Precision Land on Logistics - ID 0 / Corridor Elbow )
-    (-7.8333401, 110.3842762, 2.5), # Waypoint 3 (Center on Barrel - ID 1)
-    (-7.8333536, 110.3842784, 2.5)  # Waypoint 4 (Final Normal Land)
+    (-7.8332912, 110.3842767, 1.1), # Waypoint 0 (Precision Land 1)
+    (-7.8333110, 110.3842802, 1.1), # Waypoint 1 (Corridor Elbow)
+    (-7.8333401, 110.3842762, 1.1), # Waypoint 2 (Center on Barrel)
+    (-7.8333536, 110.3842784, 1.6), # Waypoint 3 (Before Window)
+    (-7.8333700, 110.3842700, 1.6), # Waypoint 4 (After Window)
+    (-7.8333900, 110.3842700, 1.6), # Waypoint 5 (Final Land Original Position)
 ]
 
 # --- Global Socket ---
@@ -106,7 +107,7 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"\rCurrent altitude: {current_altitude:.2f}m", end="")
-        if current_altitude >= altitude * 0.80:
+        if current_altitude >= altitude * 0.75:
             print("\nTarget altitude reached.")
             return True
         time.sleep(0.1)
@@ -149,13 +150,11 @@ def navigate_to_waypoint(master, lat, lon, alt):
         time.sleep(0.1)
     time.sleep(2)
 
-# UPDATED: Now accepts a vertical_ratio to handle different maneuvers.
 def calculate_velocities(x_center, y_center, frame_w, frame_h, speed, vertical_ratio):
     """Calculates forward and right velocities based on target position and a given speed."""
     corrected_x_center = frame_w - x_center
     x_offset = (corrected_x_center - frame_w / 2) / (frame_w / 2)
 
-    # Use the passed-in vertical_ratio instead of the global constant
     target_y = frame_h * vertical_ratio
     y_offset = (y_center - target_y) / (frame_h / 2)
     
@@ -164,19 +163,48 @@ def calculate_velocities(x_center, y_center, frame_w, frame_h, speed, vertical_r
     return forward_vel, right_vel
 
 def flush_socket_buffer(sock):
-    """Clears any old data from the UDP socket buffer."""
+    """
+    Clears any old data from the UDP socket buffer with real-time feedback.
+    """
+    print("Flushing UDP socket buffer...")
+    packets_cleared = 0
+    start_time = time.time()
     while True:
         try:
-            sock.recvfrom(1024)
+            # Receive data, but we don't need to do anything with it.
+            sock.recvfrom(1024) 
+            packets_cleared += 1
+            # Update the status on a single line using a carriage return
+            sys.stdout.write(f"\rCleared {packets_cleared} old packets...")
+            sys.stdout.flush()
         except socket.timeout:
+            # This is the expected exit condition: no more data to read.
             break
+        except Exception as e:
+            print(f"\nAn unexpected error occurred while flushing buffer: {e}")
+            break
+
+    # Move to the next line after the loop finishes
+    if packets_cleared > 0:
+        duration = time.time() - start_time
+        print(f"\nFinished flushing. Cleared a total of {packets_cleared} packets in {duration:.2f} seconds.")
+    else:
+        print("Buffer was already clear.")
+
+# In movement.py
 
 def center_above_target(master, sock, target_class_id, target_alt):
     flush_socket_buffer(sock)
+    send_control_command(f"set_ratio:{CENTERING_VERTICAL_RATIO}")
+    time.sleep(0.1) 
     send_control_command('resume')
     print(f"Centering above target (ID: {target_class_id}) at {target_alt}m...")
     
     start_time = time.time()
+    
+    # --- NEW: State variable for confirmation logic ---
+    # This will store the timestamp when the drone first enters the confirmation phase.
+    stable_candidate_since = None 
     
     while time.time() - start_time < CENTERING_TIMEOUT:
         alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
@@ -184,6 +212,7 @@ def center_above_target(master, sock, target_class_id, target_alt):
         if alt_msg and alt_msg.orientation == 25:
             current_alt = alt_msg.current_distance / 100.0
             
+        # Default to hover unless a target is found and we need to move
         fwd_vel, right_vel, down_vel = 0, 0, 0
         
         try:
@@ -194,40 +223,72 @@ def center_above_target(master, sock, target_class_id, target_alt):
                 current_area = detection["area"]
                 
                 target_pixel_area = w * h * CENTERING_TARGET_AREA_RATIO
-                fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED, CENTERING_VERTICAL_RATIO)
-
-
-                center_error_ratio = abs(x - w / 2) / (w/2)
-                area_progress_ratio = current_area / target_pixel_area
-                                
-                sys.stdout.write(
-                    f"\rCentering... Pos Err: {center_error_ratio:.1%}, "
-                    f"Area Prog: {min(area_progress_ratio, 1.0):.1%}, "
-                    f"Alt: {current_alt:.2f}m"
-                )
-                sys.stdout.flush()
-
-                # --- UPDATED: Success condition now checks all three criteria ---
-                is_horizontally_centered = center_error_ratio < 0.1
+                
+                # --- Check if conditions for dropping are met ---
+                is_horizontally_centered = abs(x - w / 2) / (w/2) < 0.125
                 is_close_enough = current_area >= target_pixel_area
 
                 if is_horizontally_centered and is_close_enough:
-                    print("\nTarget fully centered and close. Stabilizing for drop...")
-                    master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                        0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                        VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                    # --- START of Confirmation Logic ---
                     
-                    time.sleep(1.0)
+                    # If this is the first time we are centered, record the time.
+                    if stable_candidate_since is None:
+                        stable_candidate_since = time.time()
                     
-                    print("Drone stable. Opening gripper to drop package.")
-                    servo_control.open_gripper()
-                    time.sleep(1.0)
-                    send_control_command('pause')
-                    return True
-        except (socket.timeout, json.JSONDecodeError, KeyError):
-            fwd_vel, right_vel = 0, 0
-            print("\rSearching for drop-off target...", end="")
+                    # Calculate how long we have been stable.
+                    stable_duration = time.time() - stable_candidate_since
+                    
+                    # Check if we have been stable long enough.
+                    if stable_duration >= CENTERING_CONFIRMATION_DURATION:
+                        print(f"\nPosition confirmed for {stable_duration:.1f}s. Stabilizing for drop...")
+                        # Command a final hover to ensure stability
+                        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                            VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                        
+                        time.sleep(1.0) # Final stabilization wait
+                        
+                        print("Drone stable. Opening gripper to drop package.")
+                        servo_control.open_gripper()
+                        time.sleep(1.0)
+                        send_control_command('pause')
+                        return True
+                    else:
+                        # We are centered, but not for long enough. Command a hover and wait.
+                        # The fwd_vel and right_vel are already 0, so we just update the display.
+                        progress = (stable_duration / CENTERING_CONFIRMATION_DURATION)
+                        sys.stdout.write(
+                            f"\rConfirming position... {progress:.1%} ({stable_duration:.1f}s / {CENTERING_CONFIRMATION_DURATION:.1f}s)"
+                        )
+                        sys.stdout.flush()
+                        # --- END of Confirmation Logic ---
+                else:
+                    # --- We are not centered, so reset the confirmation timer ---
+                    stable_candidate_since = None 
+                    
+                    # Calculate velocities to get back to the center
+                    fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED, CENTERING_VERTICAL_RATIO)
 
+                    # Update status display for normal centering
+                    center_error_ratio = abs(x - w / 2) / (w/2)
+                    area_progress_ratio = current_area / target_pixel_area
+                    sys.stdout.write(
+                        f"\rCentering... Pos Err: {center_error_ratio:.1%}, "
+                        f"Area Prog: {min(area_progress_ratio, 1.0):.1%}, "
+                        f"Alt: {current_alt:.2f}m"
+                    )
+                    sys.stdout.flush()
+            else:
+                # Target is not the correct one, reset confirmation timer
+                stable_candidate_since = None
+                print("\rSearching for drop-off target (wrong ID detected)...", end="")
+
+        except (socket.timeout, json.JSONDecodeError, KeyError):
+            # --- Target lost, so reset the confirmation timer ---
+            stable_candidate_since = None
+            print("\rSearching for drop-off target (no detection)...", end="")
+
+        # Send the calculated velocity command (either for centering or for hovering during confirmation)
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
             VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -248,9 +309,10 @@ def get_dynamic_gain(current_alt):
     gain = MIN_HORIZONTAL_GAIN + gain_range * ((current_alt - GAIN_MIN_ALT) / alt_range)
     return gain
 
-# UPDATED: Implemented a combined "ascend and forward" search pattern when the target is lost.
 def execute_precision_landing(master, sock):
     flush_socket_buffer(sock)
+    send_control_command(f"set_ratio:{LANDING_VERTICAL_RATIO}")
+    time.sleep(0.1) # small delay to ensure command is processed
     send_control_command('resume')
     print(f"Starting precision landing sequence (Accepting IDs: [0, 1])...")
     
@@ -264,7 +326,6 @@ def execute_precision_landing(master, sock):
             last_known_alt = alt_msg.current_distance / 100.0
         current_altitude = last_known_alt
         
-        # Safety check for forced landing remains
         if current_altitude < FORCED_LAND_ALTITUDE:
             print(f"\nAltitude is below {FORCED_LAND_ALTITUDE}m. Forcing immediate landing.")
             land_normally(master)
@@ -275,7 +336,6 @@ def execute_precision_landing(master, sock):
             return True
 
         try:
-            # --- This part runs when the target is VISIBLE ---
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
             
@@ -283,7 +343,7 @@ def execute_precision_landing(master, sock):
             if detection.get("state") != "TRACKING" or detected_id not in [0, 1]:
                 raise socket.timeout
 
-            last_detection_time = time.time() # Update time whenever target is seen
+            last_detection_time = time.time()
             x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
             
             fwd_vel, right_vel = calculate_velocities(x, y, w, h, TRACKING_SPEED, LANDING_VERTICAL_RATIO)
@@ -291,7 +351,7 @@ def execute_precision_landing(master, sock):
             fwd_vel *= horizontal_gain
             right_vel *= horizontal_gain
             
-            down_vel = 0.15 # Continue slow descent
+            down_vel = 0.15
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
@@ -309,22 +369,16 @@ def execute_precision_landing(master, sock):
                 return True
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
-            # --- This part runs when the target is LOST ---
             time_since_lost = time.time() - last_detection_time
-            
-            # Initialize velocities for search
             vx, vy, vz = 0, 0, 0
             
             if time_since_lost < TARGET_LOST_HOVER_DURATION:
-                # Phase 1: Just hover for the first few seconds
                 print(f"\rTarget lost. Hovering... (Time since last seen: {time_since_lost:.1f}s)", end="")
             else:
-                # Phase 2: Ascend and push forward simultaneously
-                vz = -REACQUIRE_ASCEND_SPEED  # Negative Z is UP
-                vx = BLIND_FORWARD_SPEED     # Positive X is FORWARD
+                vz = -REACQUIRE_ASCEND_SPEED
+                vx = BLIND_FORWARD_SPEED
                 print(f"\rSearching... Ascending and moving forward. (Time since last seen: {time_since_lost:.1f}s)", end="")
             
-            # Send the search command
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
                 VELOCITY_CONTROL_BITMASK, 0, 0, 0, vx, vy, vz, 0, 0, 0, 0, 0))
@@ -334,6 +388,49 @@ def execute_precision_landing(master, sock):
         0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
         VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     return False
+
+def handle_window_approach(master, target_altitude):
+    """
+    Switches to EKF source set 2 (GPS for altitude) and verifies the reading.
+    Returns True if altitude is within tolerance, False otherwise.
+    """
+    print("\n--- WINDOW APPROACH ---")
+    print("Switching EKF to Source Set 2 (GPS for altitude)...")
+    
+    # Send command to switch EKF source set
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_DO_AUX_FUNCTION, 
+        0, # confirmation
+        90, # param1: Auxiliary Function code,same as RCx_OPTIONS, 90 for EKF Source Set Switch
+        1, # param2: 0:Source Set 1, 1:Source Set 2, 2:Source Set 3
+        0, # param3: Unused
+        0, # param4: Unused
+        0, # param5: Unused
+        0, # param6: Unused
+        0  # param7: Unused
+    )
+    time.sleep(1)
+    
+    print("Verifying altitude from new source...")
+    msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=3)
+    
+    if not msg:
+        print("Error: Did not receive altitude data after EKF switch.")
+        return False
+        
+    current_gps_alt = msg.relative_alt / 1000.0
+    altitude_error = abs(current_gps_alt - target_altitude)
+    
+    print(f"Target Altitude: {target_altitude:.2f}m | GPS Altitude: {current_gps_alt:.2f}m | Error: {altitude_error:.2f}m")
+    
+    if altitude_error > ALTITUDE_CHECK_TOLERANCE:
+        print(f"Altitude check FAILED. Error ({altitude_error:.2f}m) exceeds tolerance ({ALTITUDE_CHECK_TOLERANCE:.2f}m).")
+        return False
+    else:
+        print("Altitude check PASSED.")
+        return True
+
                                     
 def main():
     """Main function to connect to the drone and run the new mission."""
@@ -406,9 +503,34 @@ def main():
         center_above_target(master, sock=data_sock, target_class_id=1, target_alt=WAYPOINTS[2][2])
 
         # --- Mission 5: Fly to WP4 and Land ---
-        print("\n--- MISSION 5: Final Landing at Waypoint 4 ---")
+        print("\n--- MISSION 5: Before Window 4 ---")
         send_control_command('pause')
-        navigate_to_waypoint(master, WAYPOINTS[3][0], WAYPOINTS[3][1], WAYPOINTS[3][2])
+        navigate_to_waypoint(master, WAYPOINTS[3][0], WAYPOINTS[3][1], 1.6)
+
+        # Perform EKF switch and altitude check
+        if not handle_window_approach(master, 1.6):
+            print("\nAltitude check failed. Mission aborted. Landing immediately.")
+            land_normally(master)
+            return # End the mission
+            
+        print("\n--- Navigating to 'After Window' at Waypoint 5 ---")
+        navigate_to_waypoint(master, WAYPOINTS[4][0], WAYPOINTS[4][1], 1.6)
+
+        print("\nSwitching EKF back to Source Set 1 (Rangefinder for altitude)...")
+        master.mav.command_long_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_CMD_DO_AUX_FUNCTION,
+            0,  # confirmation
+            90, # param1: Auxiliary Function code for EKF Source Set Switch
+            0,  # param2: 0 for Source Set 1
+            0, 0, 0, 0, 0
+        )
+        time.sleep(1) # Allow time for the switch to process
+        print("EKF source successfully set to 1.")
+        
+        # --- Mission 6: Final Landing ---
+        print("\n--- MISSION 6: Final Landing at Waypoint 6---")
+        navigate_to_waypoint(master, WAYPOINTS[5][0], WAYPOINTS[5][1], 1.6)
         land_normally(master)
 
         print("\nMission finished successfully!")

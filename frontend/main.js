@@ -10,7 +10,7 @@ if (savedWaypoints) {
     console.log('Loaded waypoints from local storage:', recordedWaypoints);
 }
 
-const WAYPOINT_LABELS = ['Logistics 1', 'Logistics 2', 'Barrel', 'Final Land'];
+const WAYPOINT_LABELS = ['Logistics 1', 'Logistics 2', 'Barrel', 'Before Exit', 'After Exit', 'Final Land'];
 let currentVehicleState = {}; // Store the latest state globally
 
 // --- MAP INITIALIZATION ---

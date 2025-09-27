@@ -4,14 +4,14 @@
 # from anywhere within the project, correctly resolving package imports.
 # It will also activate the virtual environment.
 #
-# INSTRUCTIONS:
-# 1. Run this script from the project's root directory using the 'source' command.
-# 2. Example: source setup_env.sh
-#
-# After sourcing, your PYTHONPATH will be set for the current terminal session.
 
-# Define virtual environment name
-VENV_NAME="venv_hailo_rpi_examples"
+# Find the directory where this script is located. This is more reliable than pwd.
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+# We assume this setup script is in the project's root directory.
+PROJECT_ROOT="$SCRIPT_DIR"
+
+# Define the full path to the virtual environment
+VENV_PATH="$PROJECT_ROOT/venv_hailo_rpi_examples" 
 
 # Function to check if the script is being sourced
 is_sourced() {
@@ -58,9 +58,6 @@ else
     exit 1
 fi
 
-# Get the absolute path of the project's root directory (where this script is located).
-PROJECT_ROOT=$(pwd)
-
 # Prepend the project root to the PYTHONPATH.
 # This ensures our project's modules are found first.
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
@@ -68,11 +65,12 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 echo "Project directory added to PYTHONPATH for this session:"
 echo "${PROJECT_ROOT}"
 
-# Activate the virtual environment
-if [ -d "$VENV_NAME" ]; then
-    source $VENV_NAME/bin/activate
-    echo "Virtual environment '$VENV_NAME' activated"
+# Activate the virtual environment using the full path
+if [ -f "$VENV_PATH/bin/activate" ]; then
+    source "$VENV_PATH/bin/activate"
+    echo "Virtual environment at '$VENV_PATH' activated"
 else
-    echo "Virtual environment directory '$VENV_NAME' not found. Please ensure it is created and try again."
+    echo "ERROR: Virtual environment activation script not found at '$VENV_PATH'."
+    echo "Please ensure the path is correct in setup_env.sh."
     return 1
 fi

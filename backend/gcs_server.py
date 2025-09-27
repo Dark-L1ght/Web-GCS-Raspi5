@@ -135,7 +135,7 @@ async def handler(websocket):
                     print("Received 'start_mission' command from web client.")
                     
                     waypoints = command.get('waypoints')
-                    if not waypoints or len(waypoints) != 4:
+                    if not waypoints or len(waypoints) != 6:
                         print(f"Mission start aborted: Invalid waypoints received: {waypoints}")
                         continue # Ignore the command
 

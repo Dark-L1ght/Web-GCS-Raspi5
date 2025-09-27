@@ -1,4 +1,3 @@
-# --- IMPORTS ---
 from pathlib import Path
 import time
 import gi
@@ -25,13 +24,6 @@ CONTROL_SERVER_PORT = 5006
 
 # Video Streaming Config
 SERVER_PORT = 5001
-
-# --- NEW: CAMERA CENTER OFFSET ---
-# Adjust this value to change the vertical position of the "true center".
-# 0.5 = geometric center of the frame.
-# 0.75 = 75% of the way down the frame (for a forward-mounted camera).
-VERTICAL_CENTER_RATIO = 0.10
-# --- END NEW ---
 
 # --- FLASK SETUP (unchanged) ---
 flask_app = Flask(__name__)
@@ -62,7 +54,7 @@ def index():
     )
 
 def control_command_listener():
-    """Listens for TCP commands ('pause'/'resume') to control the UDP stream."""
+    """Listens for TCP commands ('pause'/'resume'/'set_ratio') to control the UDP stream."""
     global app_user_data
     if app_user_data is None: return
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -79,8 +71,22 @@ def control_command_listener():
                 elif data == 'resume':
                     app_user_data.set_udp_sending(True)
                     print("UDP stream RESUMED.")
+                # --- NEW: Handle set_ratio command ---
+                elif data.startswith('set_ratio:'):
+                    try:
+                        ratio_str = data.split(':')[1]
+                        ratio = float(ratio_str)
+                        if 0.0 <= ratio <= 1.0:
+                            app_user_data.set_vertical_target_ratio(ratio)
+                            print(f"Vertical target ratio set to {ratio:.2f}")
+                        else:
+                            print(f"Warning: Received invalid ratio value: {ratio}")
+                    except (IndexError, ValueError) as e:
+                        print(f"Error parsing 'set_ratio' command ('{data}'): {e}")
+                # --- END NEW ---
 
-# --- USER CALLBACK CLASS (unchanged) ---
+
+# --- UPDATED: USER CALLBACK CLASS ---
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
@@ -90,14 +96,29 @@ class user_app_callback_class(app_callback_class):
         print(f"UDP socket created to send data to {UDP_IP}:{UDP_PORT}")
         self.control_lock = threading.Lock()
         self.is_sending_udp = True
+        # --- NEW: Store the dynamic vertical ratio ---
+        self.vertical_target_ratio = 0.5 # Default to geometric center
+
     def set_output_frame(self, frame):
         with self.frame_lock: self.output_frame = frame.copy()
+
     def get_output_frame(self):
         with self.frame_lock: return self.output_frame
+
     def set_udp_sending(self, should_send: bool):
         with self.control_lock: self.is_sending_udp = should_send
+
     def can_send_udp(self):
         with self.control_lock: return self.is_sending_udp
+
+    # --- NEW: Methods to manage the vertical ratio safely ---
+    def set_vertical_target_ratio(self, ratio: float):
+        with self.control_lock: self.vertical_target_ratio = ratio
+
+    def get_vertical_target_ratio(self):
+        with self.control_lock: return self.vertical_target_ratio
+    # --- END NEW ---
+
     def close_socket(self):
         self.sock.close()
 
@@ -158,16 +179,17 @@ def app_callback(pad, info, user_data):
     if user_data.use_frame and frame is not None:
         bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # --- NEW: DRAW CENTER MARKER ON FRAME ---
+        # --- UPDATED: DRAW DYNAMIC CENTER MARKER ON FRAME ---
         if width and height:
             center_x = int(width / 2)
-            # Use the offset to calculate the true center Y position
-            target_y = int(height * VERTICAL_CENTER_RATIO)
+            # Use the DYNAMIC offset to calculate the true center Y position
+            current_target_ratio = user_data.get_vertical_target_ratio()
+            target_y = int(height * current_target_ratio)
             
             # Draw a red crosshair
             cv2.line(bgr_frame, (center_x - 15, target_y), (center_x + 15, target_y), (0, 0, 255), 2)
             cv2.line(bgr_frame, (center_x, target_y - 15), (center_x, target_y + 15), (0, 0, 255), 2)
-        # --- END NEW ---
+        # --- END UPDATED ---
 
         user_data.set_output_frame(bgr_frame)
 
@@ -184,12 +206,12 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=SERVER_PORT, debug=False), daemon=True)
     flask_thread.start()
     fake_argv = [
-       "video_streamer.py",
-       "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv2.0-yolov11n.hef",
-       "--labels-json", "/home/kingphoenix/Web-GCS-Raspi5/backend/target.json",
-       "--arch" , "hailo8",
-       "--input", "/dev/video0",
-       "--use-frame",
+        "video_streamer.py",
+        "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv2.0-yolov11n.hef",
+        "--labels-json", "/home/kingphoenix/Web-GCS-Raspi5/backend/target.json",
+        "--arch" , "hailo8",
+        "--input", "/dev/video0",
+        "--use-frame",
     ]
     sys.argv = fake_argv
     app = GStreamerDetectionApp(app_callback, user_data)
