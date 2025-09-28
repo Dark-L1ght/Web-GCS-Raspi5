@@ -14,7 +14,7 @@ ARMING_RETRIES = 3      # Number of times to attempt arming
 ARMING_RETRY_DELAY = 3  # Seconds to wait between arming attempts
 WAYPOINT_RADIUS = 0.5   # meters
 TRACKING_SPEED = 0.5    # m/s
-CENTERING_SPEED = 0.25  # m/s, horizontal speed for fine-tuning position
+CENTERING_SPEED = 0.5  # m/s, horizontal speed for fine-tuning position
 FWD_GAIN = 0.6
 BLIND_FORWARD_SPEED = 0.2
 
@@ -22,13 +22,19 @@ BLIND_FORWARD_SPEED = 0.2
 LANDING_VERTICAL_RATIO = 0.10
 CENTERING_VERTICAL_RATIO = 0.25
 
+LANDING_D_GAIN = 0.1
+CENTERING_D_GAIN = 0.1
+
 LANDING_APPROACH_ALT = 0.5
 LANDING_TIMEOUT = 30
 FORCED_LAND_ALTITUDE = 0.5
+MAX_DOWN_VEL = 0.20  # m/s, max descent speed when perfectly centered
+MIN_DOWN_VEL = 0.05  # m/s, min descent speed when error is high
+CENTERING_ERROR_THRESHOLD = 0.50 # Normalized error (50%) at which descent speed hits minimum.
 
 CENTERING_TIMEOUT = 20
-CENTERING_TARGET_AREA_RATIO = 0.1
-CENTERING_CONFIRMATION_DURATION = 1.5
+CENTERING_TARGET_AREA_RATIO = 0.05
+CENTERING_CONFIRMATION_DURATION = 1
 
 TARGET_LOST_HOVER_DURATION = 2.5
 REACQUIRE_ASCEND_SPEED = 0.3
@@ -66,6 +72,54 @@ WAYPOINTS = [
 data_sock = None
 
 # --- Core Functions ---
+class VelocityController:
+    """A Proportional-Derivative (PD) controller to calculate smooth drone velocities."""
+    def __init__(self, p_gain, d_gain):
+        self.p_gain = p_gain  # The Proportional gain (responds to current error)
+        self.d_gain = d_gain  # The Derivative gain (responds to rate of change of error)
+        
+        # Initialize state variables to store the error from the previous cycle
+        self.prev_x_error = 0.0
+        self.prev_y_error = 0.0
+        print(f"PD VelocityController initialized with P={self.p_gain}, D={self.d_gain}")
+
+    def calculate_pd_velocities(self, x_center, y_center, frame_w, frame_h, vertical_ratio):
+        """Calculates velocities using PD logic to reduce overshoot."""
+        
+        # --- 1. Calculate Current Proportional Error ---
+        # Normalized error from -1.0 to 1.0 for both axes
+        corrected_x_center = frame_w - x_center
+        current_x_error = (corrected_x_center - frame_w / 2) / (frame_w / 2)
+        
+        target_y = frame_h * vertical_ratio
+        current_y_error = (y_center - target_y) / (frame_h / 2)
+
+        # --- 2. Calculate Derivative of Error (The Damping Term) ---
+        # This measures how fast the error is changing.
+        x_derivative = current_x_error - self.prev_x_error
+        y_derivative = current_y_error - self.prev_y_error
+        
+        # --- 3. Update state for the next cycle ---
+        # It's important to do this *after* calculating the derivative.
+        self.prev_x_error = current_x_error
+        self.prev_y_error = current_y_error
+
+        # --- 4. Calculate the combined PD Control Output ---
+        # The final output is the sum of the P and D responses.
+        x_output = (self.p_gain * current_x_error) + (self.d_gain * x_derivative)
+        y_output = (self.p_gain * current_y_error) + (self.d_gain * y_derivative)
+
+        # --- 5. Convert to drone's frame of reference and apply gains ---
+        # Note the sign changes to match MAVLink NED frame conventions
+        right_vel = x_output
+        forward_vel = -y_output * FWD_GAIN
+        
+        # Apply a deadband to prevent small jitters when near the target
+        if abs(right_vel) < 0.02: right_vel = 0
+        if abs(forward_vel) < 0.02: forward_vel = 0
+            
+        return forward_vel, right_vel
+
 def send_control_command(command):
     """Sends a 'pause' or 'resume' command to the detection script via TCP."""
     try:
@@ -107,7 +161,7 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"\rCurrent altitude: {current_altitude:.2f}m", end="")
-        if current_altitude >= altitude * 0.75:
+        if current_altitude >= altitude * 0.8:
             print("\nTarget altitude reached.")
             return True
         time.sleep(0.1)
@@ -199,7 +253,8 @@ def center_above_target(master, sock, target_class_id, target_alt):
     time.sleep(0.1) 
     send_control_command('resume')
     print(f"Centering above target (ID: {target_class_id}) at {target_alt}m...")
-    
+    pd_controller = VelocityController(p_gain=CENTERING_SPEED, d_gain=CENTERING_D_GAIN)
+
     start_time = time.time()
     
     # --- NEW: State variable for confirmation logic ---
@@ -225,7 +280,7 @@ def center_above_target(master, sock, target_class_id, target_alt):
                 target_pixel_area = w * h * CENTERING_TARGET_AREA_RATIO
                 
                 # --- Check if conditions for dropping are met ---
-                is_horizontally_centered = abs(x - w / 2) / (w/2) < 0.125
+                is_horizontally_centered = abs(x - w / 2) / (w/2) < 0.05
                 is_close_enough = current_area >= target_pixel_area
 
                 if is_horizontally_centered and is_close_enough:
@@ -267,7 +322,7 @@ def center_above_target(master, sock, target_class_id, target_alt):
                     stable_candidate_since = None 
                     
                     # Calculate velocities to get back to the center
-                    fwd_vel, right_vel = calculate_velocities(x, y, w, h, CENTERING_SPEED, CENTERING_VERTICAL_RATIO)
+                    fwd_vel, right_vel = pd_controller.calculate_pd_velocities(x, y, w, h, CENTERING_VERTICAL_RATIO)
 
                     # Update status display for normal centering
                     center_error_ratio = abs(x - w / 2) / (w/2)
@@ -312,10 +367,10 @@ def get_dynamic_gain(current_alt):
 def execute_precision_landing(master, sock):
     flush_socket_buffer(sock)
     send_control_command(f"set_ratio:{LANDING_VERTICAL_RATIO}")
-    time.sleep(0.1) # small delay to ensure command is processed
+    time.sleep(0.1)
     send_control_command('resume')
     print(f"Starting precision landing sequence (Accepting IDs: [0, 1])...")
-    
+    pd_controller = VelocityController(p_gain=TRACKING_SPEED, d_gain=LANDING_D_GAIN)
     search_start_time = time.time()
     last_detection_time = time.time()
     last_known_alt = TAKEOFF_ALTITUDE
@@ -346,18 +401,30 @@ def execute_precision_landing(master, sock):
             last_detection_time = time.time()
             x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
             
-            fwd_vel, right_vel = calculate_velocities(x, y, w, h, TRACKING_SPEED, LANDING_VERTICAL_RATIO)
+            fwd_vel, right_vel = pd_controller.calculate_pd_velocities(x, y, w, h, LANDING_VERTICAL_RATIO)
             horizontal_gain = get_dynamic_gain(current_altitude)
             fwd_vel *= horizontal_gain
             right_vel *= horizontal_gain
             
-            down_vel = 0.15
+            # Calculate the normalized horizontal error (0.0 = center, 1.0 = edge of frame)
+            # We use the absolute error in x, as it's typically the most important axis for horizontal alignment.
+            center_error_ratio = abs(x - w / 2) / (w / 2)
+
+            # Calculate the scaling factor for the velocity.
+            # Clamp the error ratio so it doesn't go above our threshold, preventing negative velocities.
+            error_scale = min(center_error_ratio / CENTERING_ERROR_THRESHOLD, 1.0) 
+
+            # Linearly interpolate the downward velocity.
+            # If error_scale is 0 (centered), down_vel = MAX_DOWN_VEL.
+            # If error_scale is 1 (at/beyond threshold), down_vel = MIN_DOWN_VEL.
+            vel_range = MAX_DOWN_VEL - MIN_DOWN_VEL
+            dynamic_down_vel = MAX_DOWN_VEL - (error_scale * vel_range)
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
                 0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
+                VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, dynamic_down_vel, 0, 0, 0, 0, 0))
             
-            center_error_ratio = abs(x - w / 2) / (w/2)
-            print(f"\rLANDING (ID {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}", end="")
+            # Updated print statement to show the dynamic velocity
+            print(f"\rLANDING (ID {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}, Vz: {dynamic_down_vel:.2f} m/s", end="")
 
             if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.10:
                 print("\nTarget centered at low altitude. Switching to LAND mode.")

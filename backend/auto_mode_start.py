@@ -36,36 +36,6 @@ def connect_to_vehicle():
         print(f"Failed to connect: {e}")
         return None
 
-def wait_for_prearm_checks(master):
-    """
-    Waits until the vehicle's pre-arm checks pass.
-    
-    Args:
-        master: The Pymavlink connection object.
-        
-    Returns:
-        True if pre-arm checks pass, False on timeout or failure.
-    """
-    print("Waiting for vehicle to pass pre-arm checks...")
-    start_time = time.time()
-    timeout = 60  # 60-second timeout
-
-    while time.time() - start_time < timeout:
-        # We listen for SYS_STATUS messages
-        msg = master.recv_match(type='SYS_STATUS', blocking=True, timeout=1)
-        if msg:
-            # The bitmask for pre-arm checks is in onboard_control_sensors_health
-            # A value of 1 means all checks have passed.
-            # See MAV_SYS_STATUS_FLAGS enum for details.
-            if msg.onboard_control_sensors_health & mavutil.mavlink.MAV_SYS_STATUS_PREARM_CHECK == 1:
-                print("Pre-arm checks passed!")
-                return True
-        print("Waiting for pre-arm checks to complete...")
-        time.sleep(1)
-        
-    print("Error: Timed out waiting for pre-arm checks to pass.")
-    return False
-
 def set_mode(master, mode_name):
     """
     Sets the flight mode of the vehicle.
@@ -161,18 +131,6 @@ def main():
     master = connect_to_vehicle()
     if not master:
         sys.exit(1) # Exit if connection fails
-
-    # Wait for a good GPS fix and health before proceeding
-    if not wait_for_prearm_checks(master):
-        sys.exit(1)
-
-    # Set mode to AUTO
-    if not set_mode(master, 'AUTO'):
-        sys.exit(1)
-        
-    # Arm the vehicle
-    if not arm_vehicle(master):
-        sys.exit(1)
 
     # Start the mission
     if not start_mission(master):

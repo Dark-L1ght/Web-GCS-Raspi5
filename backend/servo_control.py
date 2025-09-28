@@ -60,13 +60,13 @@ def open_gripper():
     """Moves both servos to the 'open' position."""
     print(f"Opening gripper (Angle: {GRIPPER_OPEN_ANGLE})...")
     # Both servos move to the SAME open angle
-    _set_gripper_angles(GRIPPER_OPEN_ANGLE + 20, GRIPPER_OPEN_ANGLE)
+    _set_gripper_angles(GRIPPER_OPEN_ANGLE + 5, GRIPPER_OPEN_ANGLE)
 
 def close_gripper():
     """Moves both servos to the 'close' position."""
     print(f"Closing gripper (Angle: {GRIPPER_CLOSE_ANGLE})...")
     # Both servos move to the SAME close angle
-    _set_gripper_angles(GRIPPER_CLOSE_ANGLE + 20, GRIPPER_CLOSE_ANGLE)
+    _set_gripper_angles(GRIPPER_CLOSE_ANGLE + 5, GRIPPER_CLOSE_ANGLE)
 
 def cleanup():
     """
@@ -83,6 +83,8 @@ if __name__ == '__main__':
         setup()
         while True:
             open_gripper()
+            time.sleep(2)
+            close_gripper()
     except KeyboardInterrupt:
         print("\nProgram interrupted.")
     finally:
