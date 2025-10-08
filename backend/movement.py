@@ -13,28 +13,32 @@ TAKEOFF_ALTITUDE = 1.1  # meters
 ARMING_RETRIES = 3      # Number of times to attempt arming
 ARMING_RETRY_DELAY = 3  # Seconds to wait between arming attempts
 WAYPOINT_RADIUS = 0.5   # meters
-TRACKING_SPEED = 0.5    # m/s
-CENTERING_SPEED = 0.5  # m/s, horizontal speed for fine-tuning position
+TRACKING_SPEED = 0.4    # m/s
+CENTERING_SPEED = 0.250   # m/s, horizontal speed for fine-tuning position
 FWD_GAIN = 0.6
 BLIND_FORWARD_SPEED = 0.2
 
 # CAMERA CENTER OFFSET
-LANDING_VERTICAL_RATIO = 0.10
+LANDING_VERTICAL_RATIO = 0.15
 CENTERING_VERTICAL_RATIO = 0.25
 
-LANDING_D_GAIN = 0.1
-CENTERING_D_GAIN = 0.1
+CENTERING_SUCCESS_THRESHOLD = 0.1
 
-LANDING_APPROACH_ALT = 0.5
+LANDING_D_GAIN = 0.15
+CENTERING_D_GAIN = 0.2
+
+LANDING_APPROACH_ALT = 0.45
 LANDING_TIMEOUT = 30
-FORCED_LAND_ALTITUDE = 0.5
-MAX_DOWN_VEL = 0.20  # m/s, max descent speed when perfectly centered
-MIN_DOWN_VEL = 0.05  # m/s, min descent speed when error is high
+FORCED_LAND_ALTITUDE = 0.4
+MAX_DOWN_VEL = 0.10  # m/s, max descent speed when perfectly centered
+MIN_DOWN_VEL = 0.03  # m/s, min descent speed when error is high
 CENTERING_ERROR_THRESHOLD = 0.50 # Normalized error (50%) at which descent speed hits minimum.
 
-CENTERING_TIMEOUT = 20
+CENTERING_TIMEOUT = 15
 CENTERING_TARGET_AREA_RATIO = 0.05
-CENTERING_CONFIRMATION_DURATION = 1
+CENTERING_CONFIRMATION_DURATION = 0.5
+FINAL_VERIFICATION_TIMEOUT = 1.5  # Seconds to wait for a final confirming frame
+FINAL_VERIFICATION_THRESHOLD = 0.15 # A tighter centering tolerance (7%) for the final check
 
 TARGET_LOST_HOVER_DURATION = 2.5
 REACQUIRE_ASCEND_SPEED = 0.3
@@ -44,8 +48,8 @@ ALTITUDE_CHECK_TOLERANCE = 0.3 # meters. Fails if GPS alt is off by more than th
 
 GAIN_MAX_ALT = 1
 GAIN_MIN_ALT = 0.4
-MAX_HORIZONTAL_GAIN = 0.6
-MIN_HORIZONTAL_GAIN = 0.2
+MAX_HORIZONTAL_GAIN = 0.8
+MIN_HORIZONTAL_GAIN = 0.4
 
 # --- UDP Network Configuration ---
 UDP_RECEIVE_IP = "127.0.0.2"
@@ -78,39 +82,37 @@ class VelocityController:
         self.p_gain = p_gain  # The Proportional gain (responds to current error)
         self.d_gain = d_gain  # The Derivative gain (responds to rate of change of error)
         
-        # Initialize state variables to store the error from the previous cycle
+        # Initialize state variables
         self.prev_x_error = 0.0
         self.prev_y_error = 0.0
+        # NEW: Store the current proportional error for external access
+        self.current_x_error = 0.0
+        self.current_y_error = 0.0
         print(f"PD VelocityController initialized with P={self.p_gain}, D={self.d_gain}")
 
     def calculate_pd_velocities(self, x_center, y_center, frame_w, frame_h, vertical_ratio):
         """Calculates velocities using PD logic to reduce overshoot."""
         
         # --- 1. Calculate Current Proportional Error ---
-        # Normalized error from -1.0 to 1.0 for both axes
         corrected_x_center = frame_w - x_center
-        current_x_error = (corrected_x_center - frame_w / 2) / (frame_w / 2)
+        self.current_x_error = (corrected_x_center - frame_w / 2) / (frame_w / 2)
         
         target_y = frame_h * vertical_ratio
-        current_y_error = (y_center - target_y) / (frame_h / 2)
+        self.current_y_error = (y_center - target_y) / (frame_h / 2)
 
         # --- 2. Calculate Derivative of Error (The Damping Term) ---
-        # This measures how fast the error is changing.
-        x_derivative = current_x_error - self.prev_x_error
-        y_derivative = current_y_error - self.prev_y_error
+        x_derivative = self.current_x_error - self.prev_x_error
+        y_derivative = self.current_y_error - self.prev_y_error
         
         # --- 3. Update state for the next cycle ---
-        # It's important to do this *after* calculating the derivative.
-        self.prev_x_error = current_x_error
-        self.prev_y_error = current_y_error
+        self.prev_x_error = self.current_x_error
+        self.prev_y_error = self.current_y_error
 
         # --- 4. Calculate the combined PD Control Output ---
-        # The final output is the sum of the P and D responses.
-        x_output = (self.p_gain * current_x_error) + (self.d_gain * x_derivative)
-        y_output = (self.p_gain * current_y_error) + (self.d_gain * y_derivative)
+        x_output = (self.p_gain * self.current_x_error) + (self.d_gain * x_derivative)
+        y_output = (self.p_gain * self.current_y_error) + (self.d_gain * y_derivative)
 
         # --- 5. Convert to drone's frame of reference and apply gains ---
-        # Note the sign changes to match MAVLink NED frame conventions
         right_vel = x_output
         forward_vel = -y_output * FWD_GAIN
         
@@ -161,7 +163,7 @@ def arm_and_takeoff(master, altitude):
             return False
         current_altitude = msg.relative_alt / 1000.0
         print(f"\rCurrent altitude: {current_altitude:.2f}m", end="")
-        if current_altitude >= altitude * 0.8:
+        if current_altitude >= altitude * 0.75: # Increased threshold for safety
             print("\nTarget altitude reached.")
             return True
         time.sleep(0.1)
@@ -197,9 +199,9 @@ def navigate_to_waypoint(master, lat, lon, alt):
         dlon = math.radians(lon - current_lon)
         a = math.sin(dlat/2)**2 + math.cos(math.radians(current_lat)) * math.cos(math.radians(lat)) * math.sin(dlon/2)**2
         distance = 6371000 * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-        print(f"Distance to target: {distance:.1f}m")
+        print(f"\rDistance to target: {distance:.1f}m", end="")
         if distance <= WAYPOINT_RADIUS:
-            print("Waypoint reached!")
+            print("\nWaypoint reached!")
             break
         time.sleep(0.1)
     time.sleep(2)
@@ -245,112 +247,157 @@ def flush_socket_buffer(sock):
     else:
         print("Buffer was already clear.")
 
-# In movement.py
+def verify_final_position(sock, target_class_ids, frame_w, frame_h):
+    """
+    Performs a final, high-precision check to confirm the target is still
+    perfectly centered before committing to an action like opening the gripper.
+    Accepts a list of valid class IDs.
 
-def center_above_target(master, sock, target_class_id, target_alt):
+    Returns:
+        bool: True if position is verified, False otherwise.
+    """
+    print("Performing final position verification...")
+    verification_start_time = time.time()
+    
+    # --- NEW: Make the function robust by ensuring target_class_ids is a list ---
+    if not isinstance(target_class_ids, list):
+        target_class_ids = [target_class_ids] # Convert a single int to a list
+
     flush_socket_buffer(sock)
-    send_control_command(f"set_ratio:{CENTERING_VERTICAL_RATIO}")
-    time.sleep(0.1) 
-    send_control_command('resume')
-    print(f"Centering above target (ID: {target_class_id}) at {target_alt}m...")
-    pd_controller = VelocityController(p_gain=CENTERING_SPEED, d_gain=CENTERING_D_GAIN)
-
-    start_time = time.time()
     
-    # --- NEW: State variable for confirmation logic ---
-    # This will store the timestamp when the drone first enters the confirmation phase.
-    stable_candidate_since = None 
-    
-    while time.time() - start_time < CENTERING_TIMEOUT:
-        alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
-        current_alt = -1
-        if alt_msg and alt_msg.orientation == 25:
-            current_alt = alt_msg.current_distance / 100.0
-            
-        # Default to hover unless a target is found and we need to move
-        fwd_vel, right_vel, down_vel = 0, 0, 0
-        
+    while time.time() - verification_start_time < FINAL_VERIFICATION_TIMEOUT:
         try:
             data, _ = sock.recvfrom(1024)
             detection = json.loads(data.decode())
-            if detection.get("state") == "TRACKING" and detection.get("class_id") == target_class_id:
-                x, y, w, h = detection["x_center"], detection["y_center"], detection["frame_width"], detection["frame_height"]
-                current_area = detection["area"]
-                
-                target_pixel_area = w * h * CENTERING_TARGET_AREA_RATIO
-                
-                # --- Check if conditions for dropping are met ---
-                is_horizontally_centered = abs(x - w / 2) / (w/2) < 0.05
-                is_close_enough = current_area >= target_pixel_area
 
-                if is_horizontally_centered and is_close_enough:
-                    # --- START of Confirmation Logic ---
-                    
-                    # If this is the first time we are centered, record the time.
-                    if stable_candidate_since is None:
-                        stable_candidate_since = time.time()
-                    
-                    # Calculate how long we have been stable.
-                    stable_duration = time.time() - stable_candidate_since
-                    
-                    # Check if we have been stable long enough.
-                    if stable_duration >= CENTERING_CONFIRMATION_DURATION:
-                        print(f"\nPosition confirmed for {stable_duration:.1f}s. Stabilizing for drop...")
-                        # Command a final hover to ensure stability
-                        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
-                            0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-                            VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-                        
-                        time.sleep(1.0) # Final stabilization wait
-                        
-                        print("Drone stable. Opening gripper to drop package.")
+            # --- MODIFIED: Check if the detected ID is in the list of valid IDs ---
+            if detection.get("class_id") not in target_class_ids:
+                continue # Ignore data from other objects
+
+            x = detection["x_center"]
+            
+            final_error_ratio = abs(x - frame_w / 2) / (frame_w / 2)
+            
+            if final_error_ratio < FINAL_VERIFICATION_THRESHOLD:
+                print(f"Verification PASSED. Final error: {final_error_ratio:.1%}")
+                return True
+            else:
+                print(f"Verification FAILED. Target drifted. Final error: {final_error_ratio:.1%}")
+                return False
+
+        except (socket.timeout, json.JSONDecodeError, KeyError):
+            pass
+
+    print("Verification FAILED. Timed out waiting for a confirming frame.")
+    return False
+
+def center_above_target(master, sock, target_class_ids, target_alt):
+    """
+    Centers the drone precisely over a target using a PD controller.
+    This function is an adaptation of the precision landing logic, but for
+    hovering and dropping tasks. Accepts a list of valid class IDs.
+    """
+    # --- NEW: Make the function robust by ensuring target_class_ids is a list ---
+    if not isinstance(target_class_ids, list):
+        target_class_ids = [target_class_ids] # Convert a single int to a list
+
+    flush_socket_buffer(sock)
+    send_control_command(f"set_ratio:{CENTERING_VERTICAL_RATIO}")
+    time.sleep(0.1)
+    send_control_command('resume')
+    # --- MODIFIED: Updated print statement for clarity ---
+    print(f"Centering above target (Accepting IDs: {target_class_ids}) at {target_alt:.2f}m...")
+
+    controller = VelocityController(p_gain=CENTERING_SPEED, d_gain=CENTERING_D_GAIN)
+    start_time = time.time()
+    last_detection_time = time.time()
+    last_known_alt = target_alt
+    centered_confirmation_start = None
+
+    while time.time() - start_time < CENTERING_TIMEOUT:
+        alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.05)
+        if alt_msg and alt_msg.orientation == 25:
+            last_known_alt = alt_msg.current_distance / 100.0
+        current_altitude = last_known_alt
+
+        fwd_vel, right_vel, down_vel = 0, 0, 0 
+
+        try:
+            data, _ = sock.recvfrom(1024)
+            detection = json.loads(data.decode())
+
+            detected_id = detection.get("class_id")
+
+            last_detection_time = time.time()
+            x, y = detection["x_center"], detection["y_center"]
+            w, h = detection["frame_width"], detection["frame_height"]
+            
+            # ... (rest of the calculation logic is unchanged)
+            current_area = detection["area"]
+            fwd_vel, right_vel = controller.calculate_pd_velocities(x, y, w, h, CENTERING_VERTICAL_RATIO)
+            horizontal_gain = get_dynamic_gain(current_altitude)
+            fwd_vel *= horizontal_gain
+            right_vel *= horizontal_gain
+            horizontal_error_ratio = abs(x - w / 2) / (w / 2)
+            is_horizontally_centered = horizontal_error_ratio < CENTERING_SUCCESS_THRESHOLD
+            target_y = h * CENTERING_VERTICAL_RATIO
+            vertical_error_ratio = abs(y - target_y) / (h / 2)
+            is_vertically_centered = vertical_error_ratio < CENTERING_SUCCESS_THRESHOLD
+            target_pixel_area = w * h * CENTERING_TARGET_AREA_RATIO
+            is_close_enough = current_area >= target_pixel_area
+            area_progress_ratio = min(current_area / target_pixel_area, 1.0)
+            
+            print(
+                f"\rCENTERING (ID {detected_id}): Alt: {current_altitude:.2f}m, " # Added detected ID
+                f"H-Err: {horizontal_error_ratio:.1%}, "
+                f"V-Err: {vertical_error_ratio:.1%}, "
+                f"Area: {area_progress_ratio:.1%}", end=""
+            )
+            
+            if is_horizontally_centered and is_vertically_centered and is_close_enough:
+                if centered_confirmation_start is None:
+                    centered_confirmation_start = time.time()
+                
+                if time.time() - centered_confirmation_start > CENTERING_CONFIRMATION_DURATION:
+                    print("\nTarget fully centered. Stopping and stabilizing for final check...")
+                    master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+                        0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+                        VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                    time.sleep(1)
+                    send_control_command("pause")
+                    # --- MODIFIED: Pass the list of IDs to the verification function ---
+                    if verify_final_position(sock, target_class_ids, w, h):
+                        print("Drone stable. Opening gripper.")
                         servo_control.open_gripper()
                         time.sleep(1.0)
                         send_control_command('pause')
                         return True
                     else:
-                        # We are centered, but not for long enough. Command a hover and wait.
-                        # The fwd_vel and right_vel are already 0, so we just update the display.
-                        progress = (stable_duration / CENTERING_CONFIRMATION_DURATION)
-                        sys.stdout.write(
-                            f"\rConfirming position... {progress:.1%} ({stable_duration:.1f}s / {CENTERING_CONFIRMATION_DURATION:.1f}s)"
-                        )
-                        sys.stdout.flush()
-                        # --- END of Confirmation Logic ---
-                else:
-                    # --- We are not centered, so reset the confirmation timer ---
-                    stable_candidate_since = None 
-                    
-                    # Calculate velocities to get back to the center
-                    fwd_vel, right_vel = pd_controller.calculate_pd_velocities(x, y, w, h, CENTERING_VERTICAL_RATIO)
-
-                    # Update status display for normal centering
-                    center_error_ratio = abs(x - w / 2) / (w/2)
-                    area_progress_ratio = current_area / target_pixel_area
-                    sys.stdout.write(
-                        f"\rCentering... Pos Err: {center_error_ratio:.1%}, "
-                        f"Area Prog: {min(area_progress_ratio, 1.0):.1%}, "
-                        f"Alt: {current_alt:.2f}m"
-                    )
-                    sys.stdout.flush()
+                        print("Resuming centering...")
+                        centered_confirmation_start = None
             else:
-                # Target is not the correct one, reset confirmation timer
-                stable_candidate_since = None
-                print("\rSearching for drop-off target (wrong ID detected)...", end="")
+                centered_confirmation_start = None
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
-            # --- Target lost, so reset the confirmation timer ---
-            stable_candidate_since = None
-            print("\rSearching for drop-off target (no detection)...", end="")
+            time_since_lost = time.time() - last_detection_time
+            if time_since_lost < TARGET_LOST_HOVER_DURATION:
+                print(f"\rTarget lost. Hovering in place... ({time_since_lost:.1f}s)", end="")
+                fwd_vel, right_vel = 0, 0
+            else:
+                # --- MODIFIED: Updated print statement ---
+                print(f"\rSearching for drop-off target (IDs {target_class_ids})...", end="")
+                fwd_vel, right_vel = 0, 0
 
-        # Send the calculated velocity command (either for centering or for hovering during confirmation)
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
             0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
             VELOCITY_CONTROL_BITMASK, 0, 0, 0, fwd_vel, right_vel, down_vel, 0, 0, 0, 0, 0))
         time.sleep(0.05)
 
-    print("\nCentering timeout reached.")
+    print("\nCentering timeout reached. Aborting drop sequence.")
     send_control_command('pause')
+    master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
+        0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+        VELOCITY_CONTROL_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     return False
 
 def get_dynamic_gain(current_alt):
@@ -364,6 +411,7 @@ def get_dynamic_gain(current_alt):
     gain = MIN_HORIZONTAL_GAIN + gain_range * ((current_alt - GAIN_MIN_ALT) / alt_range)
     return gain
 
+# MODIFIED: This function now uses GLOBAL_POSITION_INT for altitude.
 def execute_precision_landing(master, sock):
     flush_socket_buffer(sock)
     send_control_command(f"set_ratio:{LANDING_VERTICAL_RATIO}")
@@ -384,7 +432,6 @@ def execute_precision_landing(master, sock):
         if current_altitude < FORCED_LAND_ALTITUDE:
             print(f"\nAltitude is below {FORCED_LAND_ALTITUDE}m. Forcing immediate landing.")
             land_normally(master)
-            time.sleep(1)
             print("Landed. Closing gripper to pick up package.")
             time.sleep(1)
             servo_control.close_gripper()
@@ -407,16 +454,12 @@ def execute_precision_landing(master, sock):
             right_vel *= horizontal_gain
             
             # Calculate the normalized horizontal error (0.0 = center, 1.0 = edge of frame)
-            # We use the absolute error in x, as it's typically the most important axis for horizontal alignment.
             center_error_ratio = abs(x - w / 2) / (w / 2)
 
             # Calculate the scaling factor for the velocity.
-            # Clamp the error ratio so it doesn't go above our threshold, preventing negative velocities.
             error_scale = min(center_error_ratio / CENTERING_ERROR_THRESHOLD, 1.0) 
 
             # Linearly interpolate the downward velocity.
-            # If error_scale is 0 (centered), down_vel = MAX_DOWN_VEL.
-            # If error_scale is 1 (at/beyond threshold), down_vel = MIN_DOWN_VEL.
             vel_range = MAX_DOWN_VEL - MIN_DOWN_VEL
             dynamic_down_vel = MAX_DOWN_VEL - (error_scale * vel_range)
             master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(
@@ -426,10 +469,9 @@ def execute_precision_landing(master, sock):
             # Updated print statement to show the dynamic velocity
             print(f"\rLANDING (ID {detected_id}): Alt: {current_altitude:.2f}m, Gain: {horizontal_gain:.2f}, Err: {center_error_ratio:.2%}, Vz: {dynamic_down_vel:.2f} m/s", end="")
 
-            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.10:
+            if current_altitude < LANDING_APPROACH_ALT and center_error_ratio < 0.05:
                 print("\nTarget centered at low altitude. Switching to LAND mode.")
                 land_normally(master)
-                time.sleep(1)
                 print("Landed. Closing gripper to pick up package.")
                 time.sleep(1)
                 servo_control.close_gripper()
@@ -498,7 +540,7 @@ def handle_window_approach(master, target_altitude):
         print("Altitude check PASSED.")
         return True
 
-                                    
+                                        
 def main():
     """Main function to connect to the drone and run the new mission."""
 
@@ -523,13 +565,14 @@ def main():
     master.wait_heartbeat()
     print(f"Heartbeat from system (system {master.target_system} component {master.target_component})")
 
-    print("Requesting DISTANCE_SENSOR stream at 10Hz...")
+    # MODIFIED: Request GLOBAL_POSITION_INT stream instead of DISTANCE_SENSOR
+    print("Requesting GLOBAL_POSITION_INT stream at 10Hz...")
     master.mav.command_long_send(
         master.target_system, 
         master.target_component, 
         mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-        mavutil.mavlink.MAVLINK_MSG_ID_DISTANCE_SENSOR,
-        100000,  # 10Hz
+        mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
+        100000,  # 10Hz in microseconds
         0, 0, 0, 0, 0
     )
     try:
@@ -553,7 +596,7 @@ def main():
         # --- Mission 2: Takeoff, fly to WP3 and Center on Target 1 ---
         print("\n--- MISSION 2: Center over Target at Waypoint 3 Barrel (Target ID 1) ---")
         navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
-        center_above_target(master, sock=data_sock, target_class_id=1, target_alt=WAYPOINTS[2][2])
+        center_above_target(master, sock=data_sock, target_class_ids=[0,1], target_alt=WAYPOINTS[2][2])
 
         # --- Mission 3: Fly to WP2 and Precision Land on Target 0 ---
         print("\n--- MISSION 3: Precision Land at Waypoint 2 (Target ID 0) ---")
@@ -567,7 +610,7 @@ def main():
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
             raise Exception("Failed to takeoff for Mission 5. Aborting mission.")
         navigate_to_waypoint(master, WAYPOINTS[2][0], WAYPOINTS[2][1], WAYPOINTS[2][2])
-        center_above_target(master, sock=data_sock, target_class_id=1, target_alt=WAYPOINTS[2][2])
+        center_above_target(master, sock=data_sock, target_class_ids=[0,1], target_alt=WAYPOINTS[2][2])
 
         # --- Mission 5: Fly to WP4 and Land ---
         print("\n--- MISSION 5: Before Window 4 ---")

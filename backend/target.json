@@ -1,9 +1,10 @@
 {
-    "detection_threshold": 0.5,
+    "detection_threshold": 0.4,
     "max_boxes":200,
     "labels": [
       "unlabeled",
       "target",
-      "target_drop"
+      "target_drop",
+      "gate"
     ]
 }
