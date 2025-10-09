@@ -1,6 +1,5 @@
 // --- CONFIGURATION ---
 const COMPANION_COMPUTER_IP = '192.168.10.212';
-const MISSION_ALTITUDE = 1.1; // Default altitude for waypoints
 
 // --- WAYPOINT STATE ---
 // Check localStorage for saved waypoints when the page loads
@@ -10,7 +9,17 @@ if (savedWaypoints) {
     console.log('Loaded waypoints from local storage:', recordedWaypoints);
 }
 
-const WAYPOINT_LABELS = ['Logistics 1', 'Logistics 2', 'Barrel', 'Before Exit', 'After Exit', 'Final Land'];
+const WAYPOINT_CONFIG = [
+    { label: 'Logistic 1',      alt: 1.1 },
+    { label: 'Logistic 2',      alt: 1.1 },
+    { label: 'Barrel Drop',     alt: 1.1 },
+    { label: 'Before Exit',     alt: 1.6 },
+    { label: 'After Exit',      alt: 1.6 },
+    { label: 'Outdoor Drop 1',  alt: 1.1 },
+    { label: 'Outdoor Drop 2',  alt: 1.1 },
+    { label: 'Final Land',      alt: 1.1 }
+];
+const WAYPOINT_LABELS = WAYPOINT_CONFIG.map(wp => wp.label);
 let currentVehicleState = {}; // Store the latest state globally
 
 // --- MAP INITIALIZATION ---
@@ -136,20 +145,24 @@ recordWpBtn.addEventListener('click', () => {
         return;
     }
 
-    if (recordedWaypoints.length < WAYPOINT_LABELS.length) {
+    const nextIndex = recordedWaypoints.length;
+    if (nextIndex < WAYPOINT_LABELS.length) {
+        // MODIFIED: Use the altitude from our new config object
+        const waypointConfig = WAYPOINT_CONFIG[nextIndex];
         const newWaypoint = {
             lat: currentVehicleState.lat,
             lon: currentVehicleState.lon,
-            alt: MISSION_ALTITUDE
+            alt: waypointConfig.alt // Use the specific altitude for this waypoint
         };
         recordedWaypoints.push(newWaypoint);
         localStorage.setItem('kingPhoenixWaypoints', JSON.stringify(recordedWaypoints)); // SAVE
-        console.log(`Recorded waypoint ${recordedWaypoints.length}:`, newWaypoint);
+        console.log(`Recorded waypoint ${nextIndex + 1} (${waypointConfig.label}):`, newWaypoint);
         updateWpButton();
         updateWpDisplay();
         updateUIState();
     }
 });
+
 
 clearWpBtn.addEventListener('click', () => {
     if (confirm("Are you sure you want to clear all recorded waypoints?")) {
@@ -165,7 +178,8 @@ clearWpBtn.addEventListener('click', () => {
 startMissionBtn.addEventListener('click', () => {
     if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
         if (recordedWaypoints.length !== WAYPOINT_LABELS.length) {
-            alert('Error: Please record all 4 waypoints before starting the mission.');
+            // MODIFIED: Updated alert message for clarity
+            alert(`Error: Please record all ${WAYPOINT_LABELS.length} waypoints before starting the mission.`);
             return;
         }
         const command = {
@@ -179,6 +193,7 @@ startMissionBtn.addEventListener('click', () => {
         alert('Error: Cannot send command. Not connected to the drone.');
     }
 });
+
 
 stopMissionBtn.addEventListener('click', () => {
     if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {

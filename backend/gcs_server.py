@@ -135,19 +135,17 @@ async def handler(websocket):
                     print("Received 'start_mission' command from web client.")
                     
                     waypoints = command.get('waypoints')
-                    if not waypoints or len(waypoints) != 6:
-                        print(f"Mission start aborted: Invalid waypoints received: {waypoints}")
+                    # MODIFICATION: Changed waypoint count check from 6 to 8
+                    if not waypoints or len(waypoints) != 8:
+                        print(f"Mission start aborted: Invalid waypoints. Expected 8, received {len(waypoints) if waypoints else 0}.")
                         continue # Ignore the command
 
                     # Convert waypoints to a JSON string for command-line argument
-                    # The outer single quotes are for the shell command
                     waypoints_json_str = json.dumps(waypoints)
                     
-                    # IMPORTANT: Update this path to be the correct one on your drone
                     script_path = '/home/kingphoenix/Web-GCS-Raspi5/run_mission_with_setup.sh'
                     mission_command = f"{script_path} '{waypoints_json_str}'"
                     
-                    # Run the blocking SSH call in a separate thread
                     asyncio.create_task(asyncio.to_thread(execute_ssh_command, mission_command))
 
                 elif action == 'stop_mission':

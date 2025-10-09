@@ -144,7 +144,7 @@ async def handler(websocket):
                     print("Received 'start_mission' command from web client.")
 
                     # IMPORTANT: Update this path to be the correct one on your drone
-                    script_path = '/home/kingphoenix/path/to/your/run_auto.sh'
+                    script_path = '/home/kingphoenix/Web-GCS-Raspi5/run_auto.sh'
                     mission_command = f"bash {script_path}"
 
                     # Run the blocking SSH call in a separate thread

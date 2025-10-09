@@ -8,48 +8,65 @@ import sys
 import tty
 import termios
 
-# --- Configuration for ONE Gripper with FOUR Servos ---
-GRIPPER_CONFIG = {
-    'lower': {
+# --- MODIFIED: Expanded Configuration for ALL Servos ---
+SERVO_CONFIG = {
+    'lower_gripper': {
         'name': 'LOWER GRIPPER',
         'channels': [0, 1, 2, 3],
-        
         'open_angles':  [180, 180, 180, 180],
         'close_angles': [50, 50, 50, 50],
-        
-        # --- NEW: Parameters for controlling the closing speed ---
-        # Adjust these values to make the closing action faster or slower.
-        # Total time = steps * delay. E.g., 50 * 0.04 = 2 seconds.
-        'slow_close_steps': 50,   # Number of small steps for the movement
-        'slow_close_delay': 0.02  # Delay between each step in seconds
+    },
+    'outdoor_drop_1': {
+        'name': 'OUTDOOR DROP 1',
+        'channel': 4, # Use singular 'channel' for single servos
+        'hold_angle': 0,
+        'drop_angle': 180,
+    },
+    'outdoor_drop_2': {
+        'name': 'OUTDOOR DROP 2',
+        'channel': 5,
+        'hold_angle': 0,
+        'drop_angle': 180,
     }
 }
 
 # --- Global Variables ---
 pca = None
-servos = {}
+servos = {} # This will now store all initialized servo objects
 
 # --- Functions ---
 
 def setup():
-    """Initializes the I2C connection and ALL servo motors."""
+    """Initializes the I2C connection and ALL configured servo motors."""
     global pca, servos
-    print("Initializing I2C and PCA9685 for 4-servo gripper control...")
+    print("Initializing I2C and PCA9685 for all servo control...")
     
     i2c = board.I2C()
     pca = PCA9685(i2c)
     pca.frequency = 50
 
-    config = GRIPPER_CONFIG['lower']
-    print(f"Initializing servos for {config['name']} on channels {config['channels']}...")
-    for i, channel_num in enumerate(config['channels']):
-        servo_key = f"lower_{i}"
-        servos[servo_key] = servo.Servo(pca.channels[channel_num])
+    # MODIFIED: Loop through all configurations to initialize every servo
+    for key, config in SERVO_CONFIG.items():
+        print(f"Initializing servos for: {config['name']}...")
+        if 'channels' in config: # This is a multi-servo setup like the gripper
+            for i, channel_num in enumerate(config['channels']):
+                servo_key = f"{key}_{i}"
+                servos[servo_key] = servo.Servo(pca.channels[channel_num])
+        elif 'channel' in config: # This is a single-servo setup
+            servo_key = key
+            servos[servo_key] = servo.Servo(pca.channels[config['channel']])
     
-    print("All servos for the lower gripper have been initialized.")
+    # NEW: Set outdoor drop servos to their 'hold' position initially
+    servos['outdoor_drop_1'].angle = SERVO_CONFIG['outdoor_drop_1']['hold_angle']
+    servos['outdoor_drop_2'].angle = SERVO_CONFIG['outdoor_drop_2']['hold_angle']
+    time.sleep(1.0)
+    servos['outdoor_drop_1'].angle = None # De-energize
+    servos['outdoor_drop_2'].angle = None # De-energize
+    
+    print("All servos have been initialized.")
 
 def _set_all_servo_angles_fast(servo_objects, target_angles):
-    """Internal function to move servos to target angles at maximum speed."""
+    """Internal function to move multiple servos to target angles at maximum speed."""
     if not pca:
         print("Error: Servos not initialized.")
         return
@@ -58,57 +75,60 @@ def _set_all_servo_angles_fast(servo_objects, target_angles):
         if angle is not None:
             servo_obj.angle = angle
     
-    time.sleep(1.0)
+    time.sleep(1.0) # Give servos time to move
     
+    # De-energize servos to save power and reduce heat
     for servo_obj in servo_objects:
         servo_obj.angle = None
 
-def _set_all_servo_angles_slowly(servo_objects, start_angles, target_angles, steps, delay):
-    """Internal function to move servos slowly using step-by-step interpolation."""
-    if not pca:
-        print("Error: Servos not initialized.")
-        return
-    
-    # Loop through each step of the movement
-    for i in range(steps + 1):
-        fraction = i / steps  # Calculate the fraction of the movement completed (0.0 to 1.0)
-        
-        # For each servo, calculate its intermediate angle for the current step
-        for j in range(len(servo_objects)):
-            start = start_angles[j]
-            target = target_angles[j]
-            
-            # Linear interpolation formula
-            current_angle = start + (target - start) * fraction
-            servo_objects[j].angle = int(current_angle)
-            
-        time.sleep(delay) # Pause briefly at this step
-
-    # De-energize servos at the final position
-    for servo_obj in servo_objects:
-        servo_obj.angle = None
+# REMOVED: The _set_all_servo_angles_slowly function is no longer needed.
 
 def open_gripper():
     """Moves the 4-servo lower gripper to the 'open' position (FAST)."""
-    config = GRIPPER_CONFIG['lower']
+    config = SERVO_CONFIG['lower_gripper']
     print(f"Opening {config['name']}...")
-    servo_objects = [servos[f"lower_{i}"] for i in range(len(config['channels']))]
+    servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
+    servo_objects = [servos[key] for key in servo_keys]
     _set_all_servo_angles_fast(servo_objects, config['open_angles'])
+    print(f"{config['name']} is OPEN.")
 
 def close_gripper():
-    """Moves the 4-servo lower gripper to the 'close' position (SLOWLY)."""
-    config = GRIPPER_CONFIG['lower']
-    print(f"Closing {config['name']} slowly...")
-    servo_objects = [servos[f"lower_{i}"] for i in range(len(config['channels']))]
+    """MODIFIED: Moves the 4-servo lower gripper to the 'close' position (FAST)."""
+    config = SERVO_CONFIG['lower_gripper']
+    print(f"Closing {config['name']}...")
+    servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
+    servo_objects = [servos[key] for key in servo_keys]
+    _set_all_servo_angles_fast(servo_objects, config['close_angles'])
+    print(f"{config['name']} is CLOSED.")
+
+# --- NEW FUNCTIONS for Outdoor Drops ---
+
+def drop_package_outdoor_1():
+    """Controls the servo for the first outdoor drop."""
+    config = SERVO_CONFIG['outdoor_drop_1']
+    print(f"Actuating {config['name']}...")
+    servo_obj = servos['outdoor_drop_1']
     
-    # Call the new slow function, providing start/end angles and speed parameters
-    _set_all_servo_angles_slowly(
-        servo_objects,
-        start_angles=config['open_angles'],
-        target_angles=config['close_angles'],
-        steps=config['slow_close_steps'],
-        delay=config['slow_close_delay']
-    )
+    servo_obj.angle = config['drop_angle']
+    time.sleep(1.5) # Time for servo to move and package to drop
+    servo_obj.angle = config['hold_angle'] # Optional: return to hold position
+    time.sleep(1.0)
+    servo_obj.angle = None # De-energize
+    print(f"{config['name']} sequence complete.")
+
+def drop_package_outdoor_2():
+    """Controls the servo for the second outdoor drop."""
+    config = SERVO_CONFIG['outdoor_drop_2']
+    print(f"Actuating {config['name']}...")
+    servo_obj = servos['outdoor_drop_2']
+    
+    servo_obj.angle = config['drop_angle']
+    time.sleep(1.5)
+    servo_obj.angle = config['hold_angle']
+    time.sleep(1.0)
+    servo_obj.angle = None
+    print(f"{config['name']} sequence complete.")
+
 
 def cleanup():
     """De-initializes the PCA9685 board."""
@@ -133,11 +153,13 @@ if __name__ == '__main__':
     try:
         setup()
         
-        print("\n--- Gripper Hotkey Control ---")
-        print("  c: Close Gripper (Slowly)")
+        print("\n--- Servo Hotkey Control ---")
+        print("  c: Close Gripper (Fast)")
         print("  o: Open Gripper (Fast)")
+        print("  1: Trigger Outdoor Drop 1")
+        print("  2: Trigger Outdoor Drop 2")
         print("  q: Quit Program")
-        print("------------------------------")
+        print("----------------------------")
         print("Waiting for key press...")
 
         while True:
@@ -147,6 +169,12 @@ if __name__ == '__main__':
                 print("Waiting for key press...")
             elif char.lower() == 'o':
                 open_gripper()
+                print("Waiting for key press...")
+            elif char == '1':
+                drop_package_outdoor_1()
+                print("Waiting for key press...")
+            elif char == '2':
+                drop_package_outdoor_2()
                 print("Waiting for key press...")
             elif char.lower() == 'q':
                 print("Quitting program.")
