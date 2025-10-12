@@ -13,20 +13,20 @@ SERVO_CONFIG = {
     'lower_gripper': {
         'name': 'LOWER GRIPPER',
         'channels': [0, 1, 2, 3],
-        'open_angles':  [180, 180, 180, 180],
-        'close_angles': [50, 50, 50, 50],
+        'open_angles':  [0, 0, 0, 0],
+        'close_angles': [130, 130, 130, 130],
     },
     'outdoor_drop_1': {
         'name': 'OUTDOOR DROP 1',
         'channel': 4, # Use singular 'channel' for single servos
-        'hold_angle': 0,
-        'drop_angle': 180,
+        'hold_angle': 90,
+        'drop_angle': 0,
     },
     'outdoor_drop_2': {
         'name': 'OUTDOOR DROP 2',
         'channel': 5,
         'hold_angle': 0,
-        'drop_angle': 180,
+        'drop_angle': 90,
     }
 }
 
@@ -81,8 +81,6 @@ def _set_all_servo_angles_fast(servo_objects, target_angles):
     for servo_obj in servo_objects:
         servo_obj.angle = None
 
-# REMOVED: The _set_all_servo_angles_slowly function is no longer needed.
-
 def open_gripper():
     """Moves the 4-servo lower gripper to the 'open' position (FAST)."""
     config = SERVO_CONFIG['lower_gripper']
@@ -110,9 +108,6 @@ def drop_package_outdoor_1():
     servo_obj = servos['outdoor_drop_1']
     
     servo_obj.angle = config['drop_angle']
-    time.sleep(1.5) # Time for servo to move and package to drop
-    servo_obj.angle = config['hold_angle'] # Optional: return to hold position
-    time.sleep(1.0)
     servo_obj.angle = None # De-energize
     print(f"{config['name']} sequence complete.")
 
@@ -123,11 +118,32 @@ def drop_package_outdoor_2():
     servo_obj = servos['outdoor_drop_2']
     
     servo_obj.angle = config['drop_angle']
-    time.sleep(1.5)
+    servo_obj.angle = None
+    print(f"{config['name']} sequence complete.")
+
+# --- NEW FUNCTIONS for Resetting Outdoor Drops ---
+
+def hold_package_outdoor_1():
+    """Explicitly moves the first outdoor drop servo to its HOLD position."""
+    config = SERVO_CONFIG['outdoor_drop_1']
+    print(f"Resetting {config['name']} to HOLD position...")
+    servo_obj = servos['outdoor_drop_1']
+    
+    servo_obj.angle = config['hold_angle']
+    time.sleep(1.0)
+    servo_obj.angle = None # De-energize
+    print(f"{config['name']} is now in HOLD position.")
+
+def hold_package_outdoor_2():
+    """Explicitly moves the second outdoor drop servo to its HOLD position."""
+    config = SERVO_CONFIG['outdoor_drop_2']
+    print(f"Resetting {config['name']} to HOLD position...")
+    servo_obj = servos['outdoor_drop_2']
+    
     servo_obj.angle = config['hold_angle']
     time.sleep(1.0)
     servo_obj.angle = None
-    print(f"{config['name']} sequence complete.")
+    print(f"{config['name']} is now in HOLD position.")
 
 
 def cleanup():
@@ -153,11 +169,14 @@ if __name__ == '__main__':
     try:
         setup()
         
+        # MODIFIED: Updated help text with new hotkeys
         print("\n--- Servo Hotkey Control ---")
         print("  c: Close Gripper (Fast)")
         print("  o: Open Gripper (Fast)")
-        print("  1: Trigger Outdoor Drop 1")
-        print("  2: Trigger Outdoor Drop 2")
+        print("  1: Open Outdoor Drop 1")
+        print("  2: Open Outdoor Drop 2")
+        print("  8: Reset Outdoor Drop 1 to HOLD position")
+        print("  9: Reset Outdoor Drop 2 to HOLD position")
         print("  q: Quit Program")
         print("----------------------------")
         print("Waiting for key press...")
@@ -175,6 +194,13 @@ if __name__ == '__main__':
                 print("Waiting for key press...")
             elif char == '2':
                 drop_package_outdoor_2()
+                print("Waiting for key press...")
+            # MODIFIED: Added elif blocks for the new hotkeys
+            elif char == '8':
+                hold_package_outdoor_1()
+                print("Waiting for key press...")
+            elif char == '9':
+                hold_package_outdoor_2()
                 print("Waiting for key press...")
             elif char.lower() == 'q':
                 print("Quitting program.")
