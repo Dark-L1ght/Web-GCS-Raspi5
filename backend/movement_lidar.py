@@ -33,7 +33,7 @@ LANDING_D_GAIN = 0.15
 CENTERING_D_GAIN = 0.2
 LANDING_APPROACH_ALT = 0.45
 LANDING_TIMEOUT = 30
-FORCED_LAND_ALTITUDE = 0.4
+FORCED_LAND_ALTITUDE = 0.3
 MAX_DOWN_VEL = 0.10  # m/s, max descent speed when perfectly centered
 MIN_DOWN_VEL = 0.03  # m/s, min descent speed when error is high
 CENTERING_ERROR_THRESHOLD = 0.50 # Normalized error (50%) at which descent speed hits minimum.
@@ -115,6 +115,7 @@ class ArduinoLidarReader:
             ser = None
             try:
                 ser = serial.Serial(self.port, self.baudrate, timeout=1)
+                ser.reset_input_buffer()
                 print(f"Successfully connected to Arduino on {self.port}")
                 while not self.stop_event.is_set():
                     if ser.in_waiting > 0:
@@ -440,6 +441,7 @@ def execute_precision_landing(master, sock, pickup_type):
             winch_control.raise_winch(WINCH_LIFT_DURATION)
             print("Winch pickup complete.")
         elif pickup_type == 'gripper':
+            servo_control.close_gripper()
             print("Package secured by aperture.")
             time.sleep(1.0)
         return True
@@ -554,46 +556,6 @@ def strafe_until_distance(master, lidar_manager, direction, target_distance):
     print("\nTimeout reached while strafing to target distance.")
     return False
 
-
-def get_current_heading(master):
-    msg = master.recv_match(type='ATTITUDE', blocking=True, timeout=1)
-    return msg.yaw if msg else None
-
-def get_angle_difference(angle1_rad, angle2_rad):
-    diff = angle2_rad - angle1_rad
-    while diff <= -math.pi: diff += 2 * math.pi
-    while diff > math.pi: diff -= 2 * math.pi
-    return diff
-
-def turn_drone_by_heading(master, angle_degrees, yaw_rate_rads=math.radians(30), tolerance_rad=0.1):
-    print(f"\n--- Executing {angle_degrees}° turn ---")
-    start_heading_rad = get_current_heading(master)
-    if start_heading_rad is None:
-        print("Error: Could not get initial heading.")
-        return False
-    target_heading_rad = start_heading_rad + math.radians(angle_degrees)
-    target_heading_rad = (target_heading_rad + math.pi) % (2 * math.pi) - math.pi
-    turn_yaw_rate = math.copysign(yaw_rate_rads, angle_degrees)
-    start_time = time.time()
-    TURN_TIMEOUT = 15
-    while time.time() - start_time < TURN_TIMEOUT:
-        current_heading_rad = get_current_heading(master)
-        if current_heading_rad is None:
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-            continue
-        remaining_angle_rad = get_angle_difference(current_heading_rad, target_heading_rad)
-        sys.stdout.write(f"\rTurning... Remaining: {math.degrees(remaining_angle_rad):.1f}°")
-        sys.stdout.flush()
-        if abs(remaining_angle_rad) < tolerance_rad:
-            print("\nTurn complete.")
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-            time.sleep(0.5)
-            return True
-        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, turn_yaw_rate, 0))
-        time.sleep(0.05)
-    print("\nError: Turn timed out.")
-    return False
-
 def navigate_sideways_to_target(master, lidar_manager, sock, direction, target_class_id):
     print(f"--- Navigating sideways ({direction}) to find target ID {target_class_id} ---")
     flush_socket_buffer(sock)
@@ -657,52 +619,6 @@ def follow_corridor(master, lidar_manager, fwd_speed, stop_condition_func):
         master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, fwd_speed, right_vel, 0, 0, 0, 0, 0, 0))
         time.sleep(0.05)
     print("\nCorridor navigation timed out!")
-    return False
-
-def fly_straight(master, lidar_manager, fwd_speed, stop_condition_func, target_altitude=None):
-    print(f"--- Flying straight (Speed: {fwd_speed} m/s) ---")
-    TIMEOUT = 30
-    start_time = time.time()
-    last_known_alt = -1
-    check_sensor = 'front'
-    wait_start_time = time.time()
-    while True:
-        if last_known_alt == -1:
-            alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1)
-            if alt_msg and alt_msg.orientation == 25:
-                last_known_alt = alt_msg.current_distance / 100.0
-        dist = lidar_manager.get_distances().get(check_sensor)
-        if dist is not None and last_known_alt != -1:
-            break
-        if time.time() - wait_start_time > 5:
-            print("Error: Timed out waiting for initial sensor data.")
-            return False
-        time.sleep(0.1)
-    while time.time() - start_time < TIMEOUT:
-        distances = lidar_manager.get_distances()
-        down_vel = 0
-        if target_altitude is not None:
-            alt_msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False, timeout=0.01)
-            current_alt = last_known_alt
-            if alt_msg and alt_msg.orientation == 25:
-                current_alt = alt_msg.current_distance / 100.0
-                last_known_alt = current_alt
-            alt_error = target_altitude - current_alt
-            if abs(alt_error) > 0.05:
-                down_vel = -ALT_GAIN * alt_error
-        current_dist = distances.get(check_sensor)
-        if current_dist is None:
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, down_vel, 0, 0, 0, 0, 0))
-            continue
-        if stop_condition_func(distances):
-            print("\nStop condition met.")
-            master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
-            return True
-        master.mav.send(mavutil.mavlink.MAVLink_set_position_target_local_ned_message(0, master.target_system, master.target_component, mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED, VELOCITY_CONTROL_YAW_RATE_BITMASK, 0, 0, 0, fwd_speed, 0, down_vel, 0, 0, 0, 0, 0))
-        sys.stdout.write(f"\rFlying straight... {check_sensor.capitalize()}: {current_dist:.2f}m, Alt: {last_known_alt:.2f}m")
-        sys.stdout.flush()
-        time.sleep(0.05)
-    print("\nfly_straight timed out!")
     return False
 
 # ==============================================================================
@@ -771,7 +687,7 @@ def main():
         
         if not arm_and_takeoff(master, TAKEOFF_ALTITUDE):
              raise Exception("Failed takeoff after Logistic 2.")
-        servo_control.close_gripper()
+
 
         print("\n--- PHASE 3: Dropping at Barrel (LiDAR) ---")
         time.sleep(1.0) # Pause to ensure LiDAR readings are stable

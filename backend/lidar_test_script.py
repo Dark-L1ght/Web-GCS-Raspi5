@@ -26,6 +26,11 @@ def main():
         try:
             # Establish a connection to the serial port
             ser = serial.Serial(ARDUINO_PORT, ARDUINO_BAUDRATE, timeout=1)
+            
+            # --- FIX: Clear any old data in the serial buffer ---
+            # This ensures we start reading from a clean slate.
+            ser.reset_input_buffer()
+            
             print(f"\nSuccessfully connected to Arduino on {ARDUINO_PORT}.")
             print("Waiting for data...")
 
@@ -44,6 +49,8 @@ def main():
                         parts = line.split(',')
                         
                         if len(parts) == 3:
+                            # The first line might be the "Arduino ready..." message
+                            # This check will gracefully ignore it without an error.
                             front_cm = int(parts[0])
                             left_cm = int(parts[1])
                             right_cm = int(parts[2])
@@ -56,9 +63,11 @@ def main():
 
                         else:
                             # Handle cases where the data is not in the expected format
-                            print(f"\n[Warning] Received malformed data: '{line}'")
+                            # This will now primarily catch the "Arduino ready..." message.
+                            print(f"\n[Info] Ignoring setup message or malformed data: '{line}'")
 
                     except (ValueError, IndexError):
+                        # This handles cases where a part is not a valid integer
                         print(f"\n[Warning] Could not parse data line: '{line}'")
                     except UnicodeDecodeError:
                          print(f"\n[Warning] Unicode decode error on received data.")
