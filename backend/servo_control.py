@@ -33,6 +33,9 @@ SERVO_CONFIG = {
 # --- Global Variables ---
 pca = None
 servos = {} # This will now store all initialized servo objects
+gripper_is_open = False
+outdoor_1_is_dropped = False # False means it's in the 'hold' position
+outdoor_2_is_dropped = False # False means it's in the 'hold' position
 
 # --- Functions ---
 
@@ -83,67 +86,96 @@ def _set_all_servo_angles_fast(servo_objects, target_angles):
 
 def open_gripper():
     """Moves the 4-servo lower gripper to the 'open' position (FAST)."""
+    global gripper_is_open
     config = SERVO_CONFIG['lower_gripper']
     print(f"Opening {config['name']}...")
     servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
     servo_objects = [servos[key] for key in servo_keys]
     _set_all_servo_angles_fast(servo_objects, config['open_angles'])
     print(f"{config['name']} is OPEN.")
+    gripper_is_open = True
 
 def close_gripper():
-    """MODIFIED: Moves the 4-servo lower gripper to the 'close' position (FAST)."""
+    """Moves the 4-servo lower gripper to the 'close' position (FAST)."""
+    global gripper_is_open
     config = SERVO_CONFIG['lower_gripper']
     print(f"Closing {config['name']}...")
     servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
     servo_objects = [servos[key] for key in servo_keys]
     _set_all_servo_angles_fast(servo_objects, config['close_angles'])
     print(f"{config['name']} is CLOSED.")
+    gripper_is_open = False
+
+def toggle_gripper():
+    """Toggles the gripper between open and closed states."""
+    if gripper_is_open:
+        close_gripper()
+    else:
+        open_gripper()
 
 # --- NEW FUNCTIONS for Outdoor Drops ---
 
 def drop_package_outdoor_1():
-    """Controls the servo for the first outdoor drop."""
+    """Moves the first outdoor servo to its DROP position."""
+    global outdoor_1_is_dropped # <-- ADDED
     config = SERVO_CONFIG['outdoor_drop_1']
-    print(f"Actuating {config['name']}...")
+    print(f"Actuating {config['name']} to DROP...")
     servo_obj = servos['outdoor_drop_1']
-    
     servo_obj.angle = config['drop_angle']
-    servo_obj.angle = None # De-energize
-    print(f"{config['name']} sequence complete.")
-
-def drop_package_outdoor_2():
-    """Controls the servo for the second outdoor drop."""
-    config = SERVO_CONFIG['outdoor_drop_2']
-    print(f"Actuating {config['name']}...")
-    servo_obj = servos['outdoor_drop_2']
-    
-    servo_obj.angle = config['drop_angle']
+    time.sleep(1.0) # Added sleep for movement
     servo_obj.angle = None
-    print(f"{config['name']} sequence complete.")
-
-# --- NEW FUNCTIONS for Resetting Outdoor Drops ---
+    print(f"{config['name']} is now in DROP position.")
+    outdoor_1_is_dropped = True
 
 def hold_package_outdoor_1():
-    """Explicitly moves the first outdoor drop servo to its HOLD position."""
+    """Moves the first outdoor servo to its HOLD position."""
+    global outdoor_1_is_dropped # <-- ADDED
     config = SERVO_CONFIG['outdoor_drop_1']
     print(f"Resetting {config['name']} to HOLD position...")
     servo_obj = servos['outdoor_drop_1']
-    
-    servo_obj.angle = config['hold_angle']
-    time.sleep(1.0)
-    servo_obj.angle = None # De-energize
-    print(f"{config['name']} is now in HOLD position.")
-
-def hold_package_outdoor_2():
-    """Explicitly moves the second outdoor drop servo to its HOLD position."""
-    config = SERVO_CONFIG['outdoor_drop_2']
-    print(f"Resetting {config['name']} to HOLD position...")
-    servo_obj = servos['outdoor_drop_2']
-    
     servo_obj.angle = config['hold_angle']
     time.sleep(1.0)
     servo_obj.angle = None
     print(f"{config['name']} is now in HOLD position.")
+    outdoor_1_is_dropped = False
+
+# --- NEW: Toggle function for the first outdoor servo ---
+def toggle_package_outdoor_1():
+    if outdoor_1_is_dropped:
+        hold_package_outdoor_1()
+    else:
+        drop_package_outdoor_1()
+
+def drop_package_outdoor_2():
+    """Moves the second outdoor servo to its DROP position."""
+    global outdoor_2_is_dropped # <-- ADDED
+    config = SERVO_CONFIG['outdoor_drop_2']
+    print(f"Actuating {config['name']} to DROP...")
+    servo_obj = servos['outdoor_drop_2']
+    servo_obj.angle = config['drop_angle']
+    time.sleep(1.0) # Added sleep for movement
+    servo_obj.angle = None
+    print(f"{config['name']} is now in DROP position.")
+    outdoor_2_is_dropped = True
+
+def hold_package_outdoor_2():
+    """Moves the second outdoor servo to its HOLD position."""
+    global outdoor_2_is_dropped # <-- ADDED
+    config = SERVO_CONFIG['outdoor_drop_2']
+    print(f"Resetting {config['name']} to HOLD position...")
+    servo_obj = servos['outdoor_drop_2']
+    servo_obj.angle = config['hold_angle']
+    time.sleep(1.0)
+    servo_obj.angle = None
+    print(f"{config['name']} is now in HOLD position.")
+    outdoor_2_is_dropped = False
+
+# --- NEW: Toggle function for the second outdoor servo ---
+def toggle_package_outdoor_2():
+    if outdoor_2_is_dropped:
+        hold_package_outdoor_2()
+    else:
+        drop_package_outdoor_2()
 
 
 def cleanup():
@@ -175,8 +207,8 @@ if __name__ == '__main__':
         print("  o: Open Gripper (Fast)")
         print("  1: Open Outdoor Drop 1")
         print("  2: Open Outdoor Drop 2")
-        print("  8: Reset Outdoor Drop 1 to HOLD position")
-        print("  9: Reset Outdoor Drop 2 to HOLD position")
+        print("  8: Close Outdoor Drop 1")
+        print("  9: Close Outdoor Drop 2")
         print("  q: Quit Program")
         print("----------------------------")
         print("Waiting for key press...")

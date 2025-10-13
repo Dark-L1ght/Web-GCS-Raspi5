@@ -35,6 +35,10 @@ MAX_DOWN_VEL = 0.10  # m/s, max descent speed when perfectly centered
 MIN_DOWN_VEL = 0.03  # m/s, min descent speed when error is high
 CENTERING_ERROR_THRESHOLD = 0.50 # Normalized error (50%) at which descent speed hits minimum.
 
+WINCH_LOWER_DURATION = 3.0      # Time to lower magnet onto the logistic
+WINCH_LIFT_DURATION = 1.0       # Time to lift logistic slightly off the ground
+WINCH_PULL_UP_DURATION = 4.0    # Time to pull magnet through the hole for release
+
 CENTERING_TIMEOUT = 15
 CENTERING_TARGET_AREA_RATIO = 0.05
 CENTERING_CONFIRMATION_DURATION = 0.5
@@ -370,20 +374,31 @@ def center_above_target(master, sock, target_alt):
                     time.sleep(1)
                     send_control_command("pause")
                     
-                    # MODIFIED: The function now verifies against the hardcoded [0, 1] list.
                     if verify_final_position(sock, [0, 1], w, h):
-                        print("Drone stable. Opening gripper.")
+                        # ================================================================
+                        # --- IMPLEMENTED: Dual drop sequence starts here ---
+                        # ================================================================
+                        print("Drone stable. Commencing dual drop sequence.")
+
+                        # Step 1: Drop Package 2 (held by aperture)
+                        print("Opening lower aperture to drop Package 2...")
                         servo_control.open_gripper()
-                        time.sleep(1.0)
+                        print("Package 2 dropped.")
+
+                        # Step 2: Drop Package 1 (held by winch/magnet)
+                        print("Activating winch to drop Package 1...")
+                        winch_control.raise_winch(WINCH_PULL_UP_DURATION)
+                        print("Package 1 dropped.")
+                        
+                        print("Dual drop sequence complete.")
+                        # ================================================================
+                        
                         send_control_command('pause')
                         return True
                     else:
                         print("Resuming centering...")
-                        # We must re-enable the detection script if verification fails
                         send_control_command('resume') 
                         centered_confirmation_start = None
-            else:
-                centered_confirmation_start = None
 
         except (socket.timeout, json.JSONDecodeError, KeyError):
             time_since_lost = time.time() - last_detection_time
