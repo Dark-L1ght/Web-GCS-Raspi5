@@ -1,3 +1,4 @@
+# --- IMPORTS ---
 from pathlib import Path
 import time
 import gi
@@ -14,55 +15,25 @@ import threading
 from flask import Flask, Response, render_template_string
 from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
-
-# --- ADDED: MONKEY PATCH FOR RTSP SUPPORT ---
-# This block of code intercepts the pipeline creation and builds a special
-# pipeline using 'uridecodebin' when it detects an "rtsp://" address.
-import hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines as ghp
-from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_helper_pipelines import QUEUE
-
-def patched_SOURCE_PIPELINE(video_source, video_width=1280, video_height=720,
-                            name='source', no_webcam_compression=False,
-                            frame_rate=30, sync=True,
-                            video_format='RGB'):
-    if str(video_source).startswith("rtsp://"):
-        print("RTSP source detected. Building custom RTSP GStreamer pipeline using uridecodebin.")
-        source_element = f'uridecodebin uri={video_source}'
-        
-        if sync:
-            fps_caps = f"video/x-raw, framerate={frame_rate}/1"
-        else:
-            fps_caps = "video/x-raw"
-
-        source_pipeline = (
-            f'{source_element} ! '
-            f'videoscale ! '
-            f'videoconvert ! '
-            f'video/x-raw, pixel-aspect-ratio=1/1, format={video_format}, '
-            f'width={video_width}, height={video_height} ! '
-            f'videorate ! capsfilter caps="{fps_caps}" '
-        )
-        return source_pipeline
-    else:
-        # Fallback to original function for non-RTSP sources
-        return ghp.original_SOURCE_PIPELINE(video_source, video_width, video_height,
-                                            name, no_webcam_compression,
-                                            frame_rate, sync, video_format)
-
-# Apply the patch
-ghp.original_SOURCE_PIPELINE = ghp.SOURCE_PIPELINE
-ghp.SOURCE_PIPELINE = patched_SOURCE_PIPELINE
-# --- END OF ADDED BLOCK ---
-
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
 
-# --- CONFIGURATION (from legacy) ---
+# --- CONFIGURATION ---
+# UDP Communication Config
 UDP_IP = "127.0.0.2"
 UDP_PORT = 5005
 CONTROL_SERVER_PORT = 5006
+
+# Video Streaming Config
 SERVER_PORT = 5001
 
-# --- FLASK SETUP (from legacy) ---
+# --- NEW: CAMERA CENTER OFFSET ---
+# Adjust this value to change the vertical position of the "true center".
+# 0.5 = geometric center of the frame.
+# 0.75 = 75% of the way down the frame (for a forward-mounted camera).
+VERTICAL_CENTER_RATIO = 0.5
+# --- END NEW ---
+
+# --- FLASK SETUP (unchanged) ---
 flask_app = Flask(__name__)
 app_user_data = None
 
@@ -91,7 +62,7 @@ def index():
     )
 
 def control_command_listener():
-    """Listens for TCP commands ('pause'/'resume'/'set_ratio') to control the UDP stream."""
+    """Listens for TCP commands ('pause'/'resume') to control the UDP stream."""
     global app_user_data
     if app_user_data is None: return
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -108,20 +79,8 @@ def control_command_listener():
                 elif data == 'resume':
                     app_user_data.set_udp_sending(True)
                     print("UDP stream RESUMED.")
-                elif data.startswith('set_ratio:'):
-                    try:
-                        ratio_str = data.split(':')[1]
-                        ratio = float(ratio_str)
-                        if 0.0 <= ratio <= 1.0:
-                            app_user_data.set_vertical_target_ratio(ratio)
-                            print(f"Vertical target ratio set to {ratio:.2f}")
-                        else:
-                            print(f"Warning: Received invalid ratio value: {ratio}")
-                    except (IndexError, ValueError) as e:
-                        print(f"Error parsing 'set_ratio' command ('{data}'): {e}")
 
-
-# --- USER CALLBACK CLASS (from legacy) ---
+# --- USER CALLBACK CLASS (unchanged) ---
 class user_app_callback_class(app_callback_class):
     def __init__(self):
         super().__init__()
@@ -131,51 +90,39 @@ class user_app_callback_class(app_callback_class):
         print(f"UDP socket created to send data to {UDP_IP}:{UDP_PORT}")
         self.control_lock = threading.Lock()
         self.is_sending_udp = True
-        self.vertical_target_ratio = 0.5 # Default to geometric center
-
     def set_output_frame(self, frame):
         with self.frame_lock: self.output_frame = frame.copy()
-
     def get_output_frame(self):
         with self.frame_lock: return self.output_frame
-
     def set_udp_sending(self, should_send: bool):
         with self.control_lock: self.is_sending_udp = should_send
-
     def can_send_udp(self):
         with self.control_lock: return self.is_sending_udp
-
-    def set_vertical_target_ratio(self, ratio: float):
-        with self.control_lock: self.vertical_target_ratio = ratio
-
-    def get_vertical_target_ratio(self):
-        with self.control_lock: return self.vertical_target_ratio
-
     def close_socket(self):
         self.sock.close()
 
-# --- GSTREAMER APP CALLBACK FUNCTION (from legacy) ---
-# This callback does NOT do fisheye correction. It only does detection.
+# --- GSTREAMER APP CALLBACK FUNCTION ---
 def app_callback(pad, info, user_data):
+    """This function is called for every frame processed by the GStreamer pipeline."""
     buffer = info.get_buffer()
     if buffer is None: return Gst.PadProbeReturn.OK
 
     user_data.increment()
     format, width, height = get_caps_from_pad(pad)
 
-    # Note: We are not modifying the buffer, just getting a copy for display.
-    # This avoids all the errors we saw before.
     frame = None
     if user_data.use_frame and all(v is not None for v in [format, width, height]):
         frame = get_numpy_from_buffer(buffer, format, width, height)
 
+    # --- DETECTION PROCESSING (unchanged) ---
     roi = hailo.get_roi_from_buffer(buffer)
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     valid_detections = []
     for det in detections:
-        # Note: Updated this to match your newer model's labels
-        if det.get_label() in ["target", "target_drop", "gate"]:
-            valid_detections.append({"detection": det, "class_id": det.get_class_id()})
+        if det.get_label() == "target":
+            valid_detections.append({"detection": det, "class_id": 0})
+        elif det.get_label() == "target_drop":
+            valid_detections.append({"detection": det, "class_id": 1})
             
     data_packet = {}
     if valid_detections:
@@ -198,57 +145,52 @@ def app_callback(pad, info, user_data):
             "state": "TRACKING",
             "class_id": largest_detection_info["class_id"]
         }
+        if frame is not None:
+            cv2.rectangle(frame, (x_min_pix, y_min_pix), (x_max_pix, y_max_pix), (0, 255, 0), 2)
+            label = f"{largest_target.get_label()} ({largest_target.get_confidence():.2f})"
+            cv2.putText(frame, label, (x_min_pix, y_min_pix - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     else:
         data_packet = {"state": "SEARCHING"}
     
     if user_data.can_send_udp():
         user_data.sock.sendto(json.dumps(data_packet).encode(), (UDP_IP, UDP_PORT))
 
-    # NOTE: The hailooverlay element is drawing the boxes now, not this script.
-    # This section just prepares the frame for the Flask web stream.
     if user_data.use_frame and frame is not None:
         bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
+        # --- NEW: DRAW CENTER MARKER ON FRAME ---
         if width and height:
             center_x = int(width / 2)
-            current_target_ratio = user_data.get_vertical_target_ratio()
-            target_y = int(height * current_target_ratio)
+            # Use the offset to calculate the true center Y position
+            target_y = int(height * VERTICAL_CENTER_RATIO)
+            
+            # Draw a red crosshair
             cv2.line(bgr_frame, (center_x - 15, target_y), (center_x + 15, target_y), (0, 0, 255), 2)
             cv2.line(bgr_frame, (center_x, target_y - 15), (center_x, target_y + 15), (0, 0, 255), 2)
+        # --- END NEW ---
 
         user_data.set_output_frame(bgr_frame)
 
     return Gst.PadProbeReturn.OK
 
-# --- MAIN EXECUTION BLOCK ---
+# --- MAIN EXECUTION BLOCK (unchanged) ---
 if __name__ == "__main__":
     user_data = user_app_callback_class()
     app_user_data = user_data
-    
     print("Starting control command listener thread...")
     control_thread = threading.Thread(target=control_command_listener, daemon=True)
     control_thread.start()
-    
-    # You can uncomment this if you want the Flask stream
-    # print(f"Starting video streaming server on http://0.0.0.0:{SERVER_PORT}")
-    # flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=SERVER_PORT, debug=False), daemon=True)
-    # flask_thread.start()
-    
-    # --- MODIFIED: USE RTSP URL AS INPUT ---
-    siyi_rtsp_url = "rtsp://192.168.144.25:8554/main.264"
-    
+    print(f"Starting video streaming server on http://0.0.0.0:{SERVER_PORT}")
+    flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=SERVER_PORT, debug=False), daemon=True)
+    flask_thread.start()
     fake_argv = [
-        "video_streamer.py",
-        # Use your newer model and labels file
-        "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv3.0-yolov11s.hef",
-        "--labels-json", "/home/kingphoenix/Web-GCS-Raspi5/backend/target.json",
-        "--arch" , "hailo8",
-        # Change the input to the RTSP stream
-        "--input", "/dev/video0",
-        "--use-frame",
+       "video_streamer.py",
+       "--hef-path", "/home/kingphoenix/Web-GCS-Raspi5/models/kpDetectv2.0-yolov11n.hef",
+       "--labels-json", "/home/kingphoenix/Web-GCS-Raspi5/backend/target.json",
+       "--arch" , "hailo8",
+       "--input", "/dev/video0",
+       "--use-frame",
     ]
-    # --- END OF MODIFICATIONS ---
-    
     sys.argv = fake_argv
     app = GStreamerDetectionApp(app_callback, user_data)
     try:

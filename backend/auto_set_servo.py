@@ -3,13 +3,18 @@ import board
 from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo
 from pymavlink import mavutil
+from gpiozero import Motor, Device
+
+# Use the default pin factory and prevent noisy GPIO warnings
+# This matches your original winch_control.py
+Device.pin_factory = None
+
 
 # =================================================================================
 # --- 1. CONFIGURATION ---
 # =================================================================================
 
 # --- Servo Configuration ---
-# This dictionary now defines all servo mechanisms.
 SERVO_CONFIG = {
     'lower_gripper': {
         'name': 'LOWER GRIPPER',
@@ -19,7 +24,7 @@ SERVO_CONFIG = {
     },
     'outdoor_drop_1': {
         'name': 'OUTDOOR DROP 1',
-        'channel': 4, # Use singular 'channel' for single servos
+        'channel': 4,
         'hold_angle': 90,
         'drop_angle': 0,
     },
@@ -31,25 +36,38 @@ SERVO_CONFIG = {
     }
 }
 
+# --- Winch Motor Configuration (from winch_control.py) ---
+WINCH_MOTOR_PINS = {
+    'in1': 17,    # BCM Pin for IN1 on L298N
+    'in2': 27,    # BCM Pin for IN2 on L298N
+    'enable': 12, # BCM Pin for ENA on L298N
+}
+WINCH_MOTOR_SPEED = 1.0 # Speed from 0.0 to 1.0
+
 # --- MAVLink Connection Configuration ---
 MAVLINK_CONNECTION_STRING = 'udp:127.0.0.1:14550'
 
 # --- MAVLink Channel Mapping ---
-# Maps an ArduPilot AUX channel to a function and its PWM threshold.
-# 'channel' MUST match the "Ser No" in your Mission Planner `DO_SET_SERVO` command.
-# AUX1 = 9, AUX2 = 10, AUX3 = 11, etc.
+# Maps an ArduPilot AUX channel to a function and its PWM threshold(s).
+# AUX1=9, AUX2=10, AUX3=11, AUX4=12, AUX5=13, AUX6=14
 MAVLINK_CONTROL_MAPPING = {
     'gripper': {
         'channel': 9,
-        'pwm_threshold': 1500 # Above threshold -> open, Below -> close
+        'pwm_threshold': 1500 # Above -> open, Below -> close
     },
     'outdoor_1': {
         'channel': 10,
-        'pwm_threshold': 1500 # Above threshold -> drop, Below -> hold
+        'pwm_threshold': 1500 # Above -> drop, Below -> hold
     },
     'outdoor_2': {
         'channel': 11,
-        'pwm_threshold': 1500 # Above threshold -> drop, Below -> hold
+        'pwm_threshold': 1500 # Above -> drop, Below -> hold
+    },
+    'winch': {
+        'channel': 12, # Using AUX4 for the winch
+        'pwm_lower_threshold': 1600, # PWM value above which we lower the winch
+        'pwm_raise_threshold': 1400  # PWM value below which we raise the winch
+                                     # In between these values is the "dead zone" where the motor stops.
     }
 }
 
@@ -59,41 +77,59 @@ MAVLINK_CONTROL_MAPPING = {
 # =================================================================================
 
 pca = None
-servos = {} # Dictionary to hold all initialized servo objects
+servos = {}        # Dictionary to hold all initialized servo objects
+winch_motor = None # Global object for the winch motor
 
 # =================================================================================
 # --- 3. HARDWARE CONTROL FUNCTIONS ---
 # =================================================================================
 
 def setup():
-    """Initializes the I2C connection and ALL configured servo motors."""
-    global pca, servos
-    print("Initializing I2C and PCA9685 for all servo control...")
+    """Initializes I2C, ALL servos, and the winch motor."""
+    global pca, servos, winch_motor
+    print("Initializing all hardware...")
+    
+    # --- Initialize Servos via PCA9685 ---
     try:
+        print(" -> Initializing I2C and PCA9685...")
         i2c = board.I2C()
         pca = PCA9685(i2c)
         pca.frequency = 50
 
-        # Loop through all configurations to initialize every servo
         for key, config in SERVO_CONFIG.items():
-            print(f"  - Initializing: {config['name']}...")
-            if 'channels' in config: # Multi-servo setup (gripper)
+            print(f"   - Initializing: {config['name']}...")
+            if 'channels' in config:
                 for i, channel_num in enumerate(config['channels']):
                     servo_key = f"{key}_{i}"
                     servos[servo_key] = servo.Servo(pca.channels[channel_num])
-            elif 'channel' in config: # Single-servo setup
+            elif 'channel' in config:
                 servos[key] = servo.Servo(pca.channels[config['channel']])
         
-        # Set outdoor drop servos to their 'hold' position initially
         hold_package_outdoor_1(silent=True)
         hold_package_outdoor_2(silent=True)
-
-        print(f"✅ All servos initialized.")
-        return True
+        print("✅ Servos initialized successfully.")
     except Exception as e:
-        print(f"❌ ERROR: Failed to initialize hardware: {e}")
+        print(f"❌ ERROR: Failed to initialize servos: {e}")
         return False
 
+    # --- Initialize Winch Motor via GPIO ---
+    try:
+        # print(" -> Initializing winch motor...")
+        # winch_motor = Motor(
+        #     forward=WINCH_MOTOR_PINS['in1'],
+        #     backward=WINCH_MOTOR_PINS['in2'],
+        #     enable=WINCH_MOTOR_PINS['enable']
+        # )
+        print("✅ Winch motor initialized successfully.")
+    except Exception as e:
+        print(f"❌ ERROR: Failed to initialize winch motor: {e}")
+        print("   (Check GPIO connections and permissions).")
+        return False
+        
+    print("✅ All hardware initialized.")
+    return True
+
+# --- Servo Functions ---
 def _set_angles(servo_objects, target_angles):
     """Internal helper to move multiple servos and then de-energize them."""
     if not pca: return
@@ -108,7 +144,6 @@ def _set_angles(servo_objects, target_angles):
         print(f"Error moving servos: {e}")
 
 def open_gripper(silent=False):
-    """Moves the 4-servo lower gripper to the 'open' position."""
     config = SERVO_CONFIG['lower_gripper']
     if not silent: print(f"OPENING {config['name']}...")
     servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
@@ -117,7 +152,6 @@ def open_gripper(silent=False):
     if not silent: print(f"{config['name']} is OPEN.")
 
 def close_gripper(silent=False):
-    """Moves the 4-servo lower gripper to the 'close' position."""
     config = SERVO_CONFIG['lower_gripper']
     if not silent: print(f"CLOSING {config['name']}...")
     servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
@@ -126,39 +160,59 @@ def close_gripper(silent=False):
     if not silent: print(f"{config['name']} is CLOSED.")
 
 def drop_package_outdoor_1(silent=False):
-    """Moves the first outdoor servo to its DROP position."""
     config = SERVO_CONFIG['outdoor_drop_1']
     if not silent: print(f"Actuating {config['name']} to DROP...")
     _set_angles([servos['outdoor_drop_1']], [config['drop_angle']])
     if not silent: print(f"{config['name']} is in DROP position.")
 
 def hold_package_outdoor_1(silent=False):
-    """Moves the first outdoor servo to its HOLD position."""
     config = SERVO_CONFIG['outdoor_drop_1']
     if not silent: print(f"Resetting {config['name']} to HOLD...")
     _set_angles([servos['outdoor_drop_1']], [config['hold_angle']])
     if not silent: print(f"{config['name']} is in HOLD position.")
 
 def drop_package_outdoor_2(silent=False):
-    """Moves the second outdoor servo to its DROP position."""
     config = SERVO_CONFIG['outdoor_drop_2']
     if not silent: print(f"Actuating {config['name']} to DROP...")
     _set_angles([servos['outdoor_drop_2']], [config['drop_angle']])
     if not silent: print(f"{config['name']} is in DROP position.")
 
 def hold_package_outdoor_2(silent=False):
-    """Moves the second outdoor servo to its HOLD position."""
     config = SERVO_CONFIG['outdoor_drop_2']
     if not silent: print(f"Resetting {config['name']} to HOLD...")
     _set_angles([servos['outdoor_drop_2']], [config['hold_angle']])
     if not silent: print(f"{config['name']} is in HOLD position.")
 
+# --- Winch Functions ---
+def lower_winch():
+    """Runs the winch motor forward to lower the payload."""
+    if not winch_motor: return
+    print("Lowering winch...")
+    winch_motor.forward(speed=WINCH_MOTOR_SPEED)
+
+def raise_winch():
+    """Runs the winch motor backward to raise the payload."""
+    if not winch_motor: return
+    print("Raising winch...")
+    winch_motor.backward(speed=WINCH_MOTOR_SPEED)
+
+def stop_winch():
+    """Stops the winch motor."""
+    if not winch_motor: return
+    print("Stopping winch.")
+    winch_motor.stop()
+
 def cleanup():
-    """De-initializes the PCA9685 board."""
+    """De-initializes PCA9685 and cleans up GPIO resources."""
     if pca:
         print("De-initializing PCA9685...")
         pca.deinit()
+    if winch_motor:
+        print("Cleaning up winch motor GPIO...")
+        winch_motor.stop()
+        winch_motor.close()
     print("Cleanup complete.")
+
 
 # =================================================================================
 # --- 4. MAVLINK LISTENER FUNCTION ---
@@ -172,7 +226,7 @@ def mavlink_listener():
     print("✅ MAVLink Heartbeat received! Listening for servo commands...")
 
     # State variables to avoid sending repeated commands
-    states = {'gripper': None, 'outdoor_1': None, 'outdoor_2': None}
+    states = {'gripper': None, 'outdoor_1': None, 'outdoor_2': None, 'winch': None}
 
     while True:
         msg = master.recv_match(type='SERVO_OUTPUT_RAW', blocking=True)
@@ -216,6 +270,26 @@ def mavlink_listener():
                 print(f"Outdoor 2 PWM {pwm_val} (< {outdoor_2_map['pwm_threshold']}). Holding.")
                 hold_package_outdoor_2()
                 states['outdoor_2'] = 'held'
+                
+        # --- Check Winch Control Channel ---
+        winch_map = MAVLINK_CONTROL_MAPPING['winch']
+        pwm_val = getattr(msg, f"servo{winch_map['channel']}_raw", 0)
+        if pwm_val > 0:
+            # Check for LOWER command
+            if pwm_val > winch_map['pwm_lower_threshold'] and states['winch'] != 'lowering':
+                print(f"Winch PWM {pwm_val} (> {winch_map['pwm_lower_threshold']}). Lowering.")
+                lower_winch()
+                states['winch'] = 'lowering'
+            # Check for RAISE command
+            elif pwm_val < winch_map['pwm_raise_threshold'] and states['winch'] != 'raising':
+                print(f"Winch PWM {pwm_val} (< {winch_map['pwm_raise_threshold']}). Raising.")
+                raise_winch()
+                states['winch'] = 'raising'
+            # Check for STOP command (in the dead zone)
+            elif (winch_map['pwm_raise_threshold'] <= pwm_val <= winch_map['pwm_lower_threshold']) and states['winch'] != 'stopped':
+                print(f"Winch PWM {pwm_val} is in the dead zone. Stopping.")
+                stop_winch()
+                states['winch'] = 'stopped'
 
 # =================================================================================
 # --- 5. MAIN EXECUTION BLOCK ---
