@@ -32,7 +32,7 @@ SERVO_CONFIG = {
         'name': 'LOWER GRIPPER',
         'channels': [0, 1, 2, 3],
         'open_angles':  [0, 0, 0, 0],
-        'close_angles': [130, 130, 130, 130],
+        'close_angles': [130, 130, 130, 180], # Note the 180 for the last servo
     },
     'outdoor_drop_1': {
         'name': 'OUTDOOR DROP 1',
@@ -140,7 +140,7 @@ def setup():
             backward=WINCH_MOTOR_PINS['in2'],
             enable=WINCH_MOTOR_PINS['enable']
         )
-        print("✅ Winch motor initialized successfully (simulation mode).")
+        print("✅ Winch motor initialized successfully.")
     except Exception as e:
         print(f"❌ ERROR: Failed to initialize winch motor: {e}")
         print("   (Check GPIO connections and permissions).")
@@ -149,7 +149,7 @@ def setup():
     print("✅ All hardware initialized.")
     return True
 
-# --- Servo Functions (omitted for brevity, they are unchanged from your original) ---
+# --- Servo Functions ---
 def _set_angles(servo_objects, target_angles):
     """Internal helper to move multiple servos and then de-energize them."""
     if not pca: return
@@ -171,13 +171,56 @@ def open_gripper(silent=False):
     _set_angles(servo_objects, config['open_angles'])
     if not silent: print(f"{config['name']} is OPEN.")
 
+# MODIFIED FUNCTION
 def close_gripper(silent=False):
+    """
+    Closes the gripper using a multi-step sequence to prevent a servo from
+    blocking the camera view during the initial phase of closing.
+    """
     config = SERVO_CONFIG['lower_gripper']
-    if not silent: print(f"CLOSING {config['name']}...")
-    servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
-    servo_objects = [servos[key] for key in servo_keys]
-    _set_angles(servo_objects, config['close_angles'])
+    if not silent: print(f"CLOSING {config['name']} (multi-step)...")
+    if not pca: return
+
+    try:
+        # Identify the servo objects
+        servo_keys = [f"lower_gripper_{i}" for i in range(len(config['channels']))]
+        all_servos = [servos[key] for key in servo_keys]
+        
+        # The last servo in the list (channel 3) is the one that moves to 180°
+        special_servo = all_servos[3]
+        other_servos = all_servos[0:3]
+
+        # Define angles for clarity
+        intermediate_angle = 50
+        special_servo_final_angle = config['close_angles'][3] # 180
+        other_servos_final_angle = config['close_angles'][0] # 130
+
+        # Step 1: Move the special servo to an intermediate position to clear camera view
+        if not silent: print(f"  -> Moving servo 4 to intermediate position ({intermediate_angle}°)...")
+        special_servo.angle = intermediate_angle
+        time.sleep(0.5)  # Wait for it to move
+
+        # Step 2: Move the other servos to their final position and the special one to its final
+        if not silent: print(f"  -> Moving other servos to final position ({other_servos_final_angle}°)...")
+        for servo_obj in other_servos:
+            servo_obj.angle = other_servos_final_angle
+
+        if not silent: print(f"  -> Moving servo 4 to final position ({special_servo_final_angle}°)...")
+        special_servo.angle = special_servo_final_angle
+
+        # Step 3: Wait for all movements to complete
+        time.sleep(1.0)
+
+        # Step 4: De-energize all servos
+        if not silent: print("  -> De-energizing all gripper servos.")
+        for servo_obj in all_servos:
+            servo_obj.angle = None
+
+    except Exception as e:
+        print(f"ERROR: An error occurred during the multi-step gripper close: {e}")
+
     if not silent: print(f"{config['name']} is CLOSED.")
+
 
 def drop_package_outdoor_1(silent=False):
     config = SERVO_CONFIG['outdoor_drop_1']
@@ -324,7 +367,7 @@ def mavlink_listener():
         msg = master.recv_match(type='SERVO_OUTPUT_RAW', blocking=True)
         if not msg: continue
 
-        # --- Check Gripper Channel (Unchanged) ---
+        # --- Check Gripper Channel ---
         gripper_map = MAVLINK_CONTROL_MAPPING['gripper']
         pwm_val = getattr(msg, f"servo{gripper_map['channel']}_raw", 0)
         if pwm_val > 0:
@@ -335,10 +378,29 @@ def mavlink_listener():
                 close_gripper()
                 states['gripper'] = 'closed'
         
-        # --- Other Servo Channels (Unchanged, omitted for brevity) ---
-        # ...
+        # --- Check Outdoor Drop 1 Channel ---
+        outdoor_1_map = MAVLINK_CONTROL_MAPPING['outdoor_1']
+        pwm_val = getattr(msg, f"servo{outdoor_1_map['channel']}_raw", 0)
+        if pwm_val > 0:
+            if pwm_val > outdoor_1_map['pwm_threshold'] and states['outdoor_1'] != 'dropped':
+                drop_package_outdoor_1()
+                states['outdoor_1'] = 'dropped'
+            elif pwm_val < outdoor_1_map['pwm_threshold'] and states['outdoor_1'] != 'held':
+                hold_package_outdoor_1()
+                states['outdoor_1'] = 'held'
 
-        # --- Check Winch Control Channel (UPDATED LOGIC) ---
+        # --- Check Outdoor Drop 2 Channel ---
+        outdoor_2_map = MAVLINK_CONTROL_MAPPING['outdoor_2']
+        pwm_val = getattr(msg, f"servo{outdoor_2_map['channel']}_raw", 0)
+        if pwm_val > 0:
+            if pwm_val > outdoor_2_map['pwm_threshold'] and states['outdoor_2'] != 'dropped':
+                drop_package_outdoor_2()
+                states['outdoor_2'] = 'dropped'
+            elif pwm_val < outdoor_2_map['pwm_threshold'] and states['outdoor_2'] != 'held':
+                hold_package_outdoor_2()
+                states['outdoor_2'] = 'held'
+
+        # --- Check Winch Control Channel ---
         winch_map = MAVLINK_CONTROL_MAPPING['winch']
         pwm_val = getattr(msg, f"servo{winch_map['channel']}_raw", 0)
         if pwm_val > 0:
@@ -364,11 +426,13 @@ def test_with_keyboard():
         print("ERROR: 'pynput' library is required for keyboard test mode.")
         return
 
-    print("\n--- Winch Keyboard Test Mode ---")
-    print("Press the following keys to change the winch state:")
-    print("  'l' : Move to LOW state")
-    print("  'd' : Move to DROP state")
-    print("  's' : Move to STAY state (return to home)")
+    print("\n--- Mechanism Keyboard Test Mode ---")
+    print("Press the following keys to test actions:")
+    print("  'o' : OPEN gripper")
+    print("  'c' : CLOSE gripper (multi-step)")
+    print("  'l' : Move winch to LOW state")
+    print("  'd' : Move winch to DROP state")
+    print("  's' : Move winch to STAY state")
     print("  'q' or 'Esc' : Quit")
     print("---------------------------------")
 
@@ -381,6 +445,10 @@ def test_with_keyboard():
                 set_winch_state('drop')
             elif char == 's':
                 set_winch_state('stay')
+            elif char == 'o':
+                open_gripper()
+            elif char == 'c':
+                close_gripper()
             elif char == 'q':
                 print("Quit key pressed. Exiting...")
                 return False # Stop listener
@@ -407,6 +475,7 @@ if __name__ == '__main__':
             if mode == 'mavlink':
                 mavlink_listener()
             elif mode == 'test':
+                # I also updated the keyboard test function to allow gripper testing
                 test_with_keyboard()
     except KeyboardInterrupt:
         print("\nProgram interrupted by user.")
