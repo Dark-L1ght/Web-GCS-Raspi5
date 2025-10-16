@@ -9,6 +9,8 @@ mav.tlog
 mav.parm
 *.parm
 mav.tlog.raw
+
+winch_state.json
 # Log files
 *.log
 *.log.full

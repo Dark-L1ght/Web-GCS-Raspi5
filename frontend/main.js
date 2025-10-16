@@ -1,5 +1,5 @@
 // --- CONFIGURATION ---
-const COMPANION_COMPUTER_IP = '192.168.10.212';
+const COMPANION_COMPUTER_IP = '192.168.10.179';
 
 // --- WAYPOINT STATE ---
 // Check localStorage for saved waypoints when the page loads
@@ -10,14 +10,14 @@ if (savedWaypoints) {
 }
 
 const WAYPOINT_CONFIG = [
-    { label: 'Logistic 1',      alt: 1.1 },
-    { label: 'Logistic 2',      alt: 1.1 },
-    { label: 'Barrel Drop',     alt: 1.1 },
-    { label: 'Before Exit',     alt: 1.6 },
-    { label: 'After Exit',      alt: 1.6 },
-    { label: 'Outdoor Drop 1',  alt: 1.1 },
-    { label: 'Outdoor Drop 2',  alt: 1.1 },
-    { label: 'Final Land',      alt: 1.1 }
+    { label: 'Logistic 1',      alt: 1.0 },
+    { label: 'Logistic 2',      alt: 1.0 },
+    { label: 'Barrel Drop',     alt: 1.0 },
+    { label: 'Before Exit',     alt: 1.4 },
+    { label: 'After Exit',      alt: 1.4 },
+    { label: 'Outdoor Drop 1',  alt: 1.0 },
+    { label: 'Outdoor Drop 2',  alt: 1.0 },
+    { label: 'Final Land',      alt: 1.0 }
 ];
 const WAYPOINT_LABELS = WAYPOINT_CONFIG.map(wp => wp.label);
 let currentVehicleState = {}; // Store the latest state globally

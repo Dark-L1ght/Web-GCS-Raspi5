@@ -5,7 +5,7 @@ from pymavlink import mavutil
 import paramiko
 
 # --- SSH Configuration ---
-DRONE_IP = '192.168.10.212' # IP DRONE
+DRONE_IP = '192.168.10.179' # IP DRONE
 DRONE_USER = 'kingphoenix' # USERNAME DRONE
 
 # --- MAVLink Connection ---

@@ -7,6 +7,8 @@ from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo
 from pymavlink import mavutil
 from gpiozero import Motor, Device
+import threading
+import serial
 
 # Use the default pin factory and prevent noisy GPIO warnings
 # This matches your original winch_control.py
@@ -26,6 +28,9 @@ except ImportError:
 # --- 1. CONFIGURATION ---
 # =================================================================================
 
+SERIAL_PORT = '/dev/ttyUSB0' # This is where your Arduino connects
+BAUD_RATE = 115200
+
 # --- Servo Configuration ---
 SERVO_CONFIG = {
     'lower_gripper': {
@@ -44,7 +49,7 @@ SERVO_CONFIG = {
         'name': 'OUTDOOR DROP 2',
         'channel': 5,
         'hold_angle': 0,
-        'drop_angle': 90,
+        'drop_angle': 120,
     }
 }
 
@@ -58,8 +63,8 @@ WINCH_MOTOR_SPEED = 1.0 # Speed from 0.0 to 1.0
 
 # --- Winch State Configuration ---
 WINCH_STATE_FILE = 'winch_state.json'
-WINCH_LOWER_DURATION = 3.0  # seconds to lower from 'stay' to 'low'
-WINCH_RAISE_DURATION = 1.5  # seconds to raise from 'stay' to 'drop'
+WINCH_LOWER_DURATION = 3  # seconds to lower from 'stay' to 'low'
+WINCH_RAISE_DURATION = 3  # seconds to raise from 'stay' to 'drop'
 
 # --- MAVLink Connection Configuration ---
 MAVLINK_CONNECTION_STRING = 'udp:127.0.0.1:14550'
@@ -99,6 +104,12 @@ pca = None
 servos = {}        # Dictionary to hold all initialized servo objects
 winch_motor = None # Global object for the winch motor
 
+mechanism_states = {
+    'gripper': 'closed',  # Assume closed on startup
+    'outdoor_1': 'held',    # Assume held on startup
+    'outdoor_2': 'held',    # Assume held on startup
+    'winch': 'stay'       # Assume stay on startup
+}
 
 # =================================================================================
 # --- 3. HARDWARE CONTROL FUNCTIONS ---
@@ -353,6 +364,61 @@ def set_winch_state(target_state):
 # --- 4. MAVLINK LISTENER & KEYBOARD TESTER ---
 # =================================================================================
 
+def serial_listener():
+    """Listens for commands from the Arduino over serial and toggles mechanisms."""
+    global mechanism_states
+    print(f"Attempting to connect to Arduino on {SERIAL_PORT}...")
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        print("✅ Serial connection to Arduino established.")
+    except serial.SerialException as e:
+        print(f"❌ ERROR: Could not open serial port {SERIAL_PORT}: {e}")
+        print("   Physical button control will be disabled.")
+        return
+
+    while True:
+        try:
+            # Read a line from the Arduino, decode it, and strip whitespace
+            line = ser.readline().decode('utf-8').strip()
+            
+            if line: # If we received a command
+                print(f"[SERIAL] Received command: {line}")
+                
+                if line == "GRIPPER_TOGGLE":
+                    if mechanism_states['gripper'] == 'closed':
+                        open_gripper()
+                        mechanism_states['gripper'] = 'open'
+                    else:
+                        close_gripper()
+                        mechanism_states['gripper'] = 'closed'
+                
+                elif line == "OUTDOOR_1_TOGGLE":
+                    if mechanism_states['outdoor_1'] == 'held':
+                        drop_package_outdoor_1()
+                        mechanism_states['outdoor_1'] = 'dropped'
+                    else:
+                        hold_package_outdoor_1()
+                        mechanism_states['outdoor_1'] = 'held'
+
+                elif line == "OUTDOOR_2_TOGGLE":
+                    if mechanism_states['outdoor_2'] == 'held':
+                        drop_package_outdoor_2()
+                        mechanism_states['outdoor_2'] = 'dropped'
+                    else:
+                        hold_package_outdoor_2()
+                        mechanism_states['outdoor_2'] = 'held'
+        except serial.SerialException:
+            print("ERROR: Arduino disconnected. Attempting to reconnect...")
+            ser.close()
+            time.sleep(3)
+            try:
+                ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+            except:
+                pass # Suppress errors during reconnection attempts
+        except Exception as e:
+            print(f"An error occurred in the serial listener: {e}")
+            time.sleep(1)
+
 def mavlink_listener():
     """Listens for SERVO_OUTPUT_RAW messages and controls all mechanisms."""
     print(f"Connecting to MAVLink on '{MAVLINK_CONNECTION_STRING}'...")
@@ -361,7 +427,7 @@ def mavlink_listener():
     print("✅ MAVLink Heartbeat received! Listening for servo commands...")
 
     # State variables to avoid sending repeated commands
-    states = {'gripper': None, 'outdoor_1': None, 'outdoor_2': None, 'winch': None}
+    last_command_states = {'gripper': None, 'outdoor_1': None, 'outdoor_2': None, 'winch': None}
 
     while True:
         msg = master.recv_match(type='SERVO_OUTPUT_RAW', blocking=True)
@@ -371,54 +437,57 @@ def mavlink_listener():
         gripper_map = MAVLINK_CONTROL_MAPPING['gripper']
         pwm_val = getattr(msg, f"servo{gripper_map['channel']}_raw", 0)
         if pwm_val > 0:
-            if pwm_val > gripper_map['pwm_threshold'] and states['gripper'] != 'open':
+            if pwm_val > gripper_map['pwm_threshold'] and last_command_states['gripper'] != 'open':
                 open_gripper()
-                states['gripper'] = 'open'
-            elif pwm_val < gripper_map['pwm_threshold'] and states['gripper'] != 'closed':
+                mechanism_states['gripper'] = 'open' # Update global state
+                last_command_states['gripper'] = 'open'
+            elif pwm_val < gripper_map['pwm_threshold'] and last_command_states['gripper'] != 'closed':
                 close_gripper()
-                states['gripper'] = 'closed'
+                mechanism_states['gripper'] = 'closed' # Update global state
+                last_command_states['gripper'] = 'closed'
         
         # --- Check Outdoor Drop 1 Channel ---
         outdoor_1_map = MAVLINK_CONTROL_MAPPING['outdoor_1']
         pwm_val = getattr(msg, f"servo{outdoor_1_map['channel']}_raw", 0)
         if pwm_val > 0:
-            if pwm_val > outdoor_1_map['pwm_threshold'] and states['outdoor_1'] != 'dropped':
+            if pwm_val > outdoor_1_map['pwm_threshold'] and last_command_states['outdoor_1'] != 'dropped':
                 drop_package_outdoor_1()
-                states['outdoor_1'] = 'dropped'
-            elif pwm_val < outdoor_1_map['pwm_threshold'] and states['outdoor_1'] != 'held':
+                mechanism_states['outdoor_1'] = 'dropped' # Update global state
+                last_command_states['outdoor_1'] = 'dropped'
+            elif pwm_val < outdoor_1_map['pwm_threshold'] and last_command_states['outdoor_1'] != 'held':
                 hold_package_outdoor_1()
-                states['outdoor_1'] = 'held'
+                mechanism_states['outdoor_1'] = 'held' # Update global state
+                last_command_states['outdoor_1'] = 'held'
 
-        # --- Check Outdoor Drop 2 Channel ---
         outdoor_2_map = MAVLINK_CONTROL_MAPPING['outdoor_2']
         pwm_val = getattr(msg, f"servo{outdoor_2_map['channel']}_raw", 0)
         if pwm_val > 0:
-            if pwm_val > outdoor_2_map['pwm_threshold'] and states['outdoor_2'] != 'dropped':
+            if pwm_val > outdoor_2_map['pwm_threshold'] and last_command_states['outdoor_2'] != 'dropped':
                 drop_package_outdoor_2()
-                states['outdoor_2'] = 'dropped'
-            elif pwm_val < outdoor_2_map['pwm_threshold'] and states['outdoor_2'] != 'held':
+                mechanism_states['outdoor_2'] = 'dropped' # Update global state
+                last_command_states['outdoor_2'] = 'dropped'
+            elif pwm_val < outdoor_2_map['pwm_threshold'] and last_command_states['outdoor_2'] != 'held':
                 hold_package_outdoor_2()
-                states['outdoor_2'] = 'held'
+                mechanism_states['outdoor_2'] = 'held' # Update global state
+                last_command_states['outdoor_2'] = 'held'
 
         # --- Check Winch Control Channel ---
         winch_map = MAVLINK_CONTROL_MAPPING['winch']
         pwm_val = getattr(msg, f"servo{winch_map['channel']}_raw", 0)
         if pwm_val > 0:
-            # Check for LOWER command
-            if pwm_val > winch_map['pwm_lower_threshold'] and states['winch'] != 'low':
+            # --- BUG 2 FIX: Replaced 'states' with 'last_command_states' ---
+            if pwm_val > winch_map['pwm_lower_threshold'] and last_command_states['winch'] != 'low':
                 print(f"Winch PWM {pwm_val} -> Commanding 'low' state.")
                 set_winch_state('low')
-                states['winch'] = 'low'
-            # Check for RAISE/DROP command
-            elif pwm_val < winch_map['pwm_raise_threshold'] and states['winch'] != 'drop':
+                last_command_states['winch'] = 'low'
+            elif pwm_val < winch_map['pwm_raise_threshold'] and last_command_states['winch'] != 'drop':
                 print(f"Winch PWM {pwm_val} -> Commanding 'drop' state.")
                 set_winch_state('drop')
-                states['winch'] = 'drop'
-            # Check for STAY command (in the dead zone)
-            elif (winch_map['pwm_raise_threshold'] <= pwm_val <= winch_map['pwm_lower_threshold']) and states['winch'] != 'stay':
+                last_command_states['winch'] = 'drop'
+            elif (winch_map['pwm_raise_threshold'] <= pwm_val <= winch_map['pwm_lower_threshold']) and last_command_states['winch'] != 'stay':
                 print(f"Winch PWM {pwm_val} -> Commanding 'stay' state.")
                 set_winch_state('stay')
-                states['winch'] = 'stay'
+                last_command_states['winch'] = 'stay'
 
 def test_with_keyboard():
     """Provides a keyboard interface to test the winch state machine."""
@@ -466,16 +535,29 @@ def test_with_keyboard():
 # =================================================================================
 
 if __name__ == '__main__':
-    mode = 'mavlink'
+    mode = 'mavlink' # Default mode now runs both listeners
     if len(sys.argv) > 1 and sys.argv[1].lower() == '--test':
         mode = 'test'
 
     try:
         if setup():
             if mode == 'mavlink':
-                mavlink_listener()
+                # Create the MAVLink listener thread
+                mavlink_thread = threading.Thread(target=mavlink_listener, daemon=True)
+                
+                # Create the Serial listener thread
+                serial_thread = threading.Thread(target=serial_listener, daemon=True)
+                
+                # Start both threads
+                print("Starting MAVLink and Serial listener threads...")
+                mavlink_thread.start()
+                serial_thread.start()
+                
+                # Keep the main program running while the threads do their work
+                while True:
+                    time.sleep(1)
+
             elif mode == 'test':
-                # I also updated the keyboard test function to allow gripper testing
                 test_with_keyboard()
     except KeyboardInterrupt:
         print("\nProgram interrupted by user.")
