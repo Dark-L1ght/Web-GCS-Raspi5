@@ -1,97 +1,260 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>King Phoenix GCS</title>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>King Phoenix GCS</title>
 
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/leaflet-rotatedmarker@0.2.0/leaflet.rotatedMarker.min.js"></script>
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/leaflet-rotatedmarker@0.2.0/leaflet.rotatedMarker.min.js"></script>
 
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-
-<header>
-    <div class="header-left">
-        <img src="assets/logo.png" alt="King Phoenix Logo" class="header-logo">
-        <h1>King Phoenix AIO GCS</h1>
-    </div>
-    <div class="status-bar">
-        <div class="status-item">
-            <div class="label">Arm Status</div>
-            <div class="value" id="arm-status">DISARMED</div>
-        </div>
-        
-        <div class="status-item">
-            <div class="label">Flight Mode</div>
-            <div class="value" id="flight-mode">--</div>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <!-- Loading Overlay -->
+        <div id="loading-overlay" class="overlay">
+            <div class="spinner"></div>
+            <p>Connecting to vehicle...</p>
         </div>
 
-        <div class="status-item">
-            <div class="label">Battery</div>
-            <div class="value" id="battery-level">--%</div>
-        </div>
-        <div class="status-item">
-            <div class="label">Status</div>
-            <div class="value" id="connection-status">DISCONNECTED</div>
-        </div>
-    </div>
-</header>
-
-    <main class="main-container">
-
-        <div class="content-area">
-            <div id="camera-panel" class="panel">
-                <img id="camera-feed" alt="/assets/camera-placeholder.jpg">
-            </div>
-            <div id="map-panel" class="panel">
-                <h2>Satellite Map</h2>
-                <div id="map"></div>
-            </div>
-        </div>
-
-        <div class="sidebar">
-            
-            <div id="waypoint-planner" class="panel">
-                <div class="button-group">
-                <button id="record-wp-btn" class="action-button">Record Logistics 1</button>
-                <button id="clear-wp-btn" class="action-button alt-action">Clear Waypoints</button>
-                </div>
-                <div id="wp-display">
-                    <p>No waypoints recorded.</p>
+        <!-- Confirmation Modal -->
+        <div id="confirm-modal" class="modal" aria-hidden="true">
+            <div class="modal-content">
+                <h3 id="modal-title">Confirm Action</h3>
+                <p id="modal-message">Are you sure?</p>
+                <div class="modal-actions">
+                    <button id="modal-cancel" class="action-button alt-action">
+                        Cancel
+                    </button>
+                    <button id="modal-confirm" class="action-button">
+                        Confirm
+                    </button>
                 </div>
             </div>
-            <div id="actions-panel" class="panel">
-                <h2>Actions</h2>
-                <div class="button-group">
-                    <button id="start-mission-btn" class="action-button">Start Mission</button>
-                    <button id="stop-mission-btn" class="action-button">Stop Mission</button>
+        </div>
+
+        <!-- Keyboard Shortcuts Help -->
+        <div id="keyboard-help" class="modal" aria-hidden="true">
+            <div class="modal-content">
+                <h3>Keyboard Shortcuts</h3>
+                <div class="shortcut-list">
+                    <div class="shortcut-item">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd>
+                        <span>Record Waypoint</span>
+                    </div>
+                    <div class="shortcut-item">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd>
+                        <span>Start Mission</span>
+                    </div>
+                    <div class="shortcut-item">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>X</kbd>
+                        <span>Stop Mission</span>
+                    </div>
+                    <div class="shortcut-item">
+                        <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd>
+                        <span>Clear Waypoints</span>
+                    </div>
+                    <div class="shortcut-item">
+                        <kbd>?</kbd> <span>Show / Hide Help</span>
+                    </div>
                 </div>
-            </div>
-            <div id="flight-data-panel" class="panel">
-                <h2>Flight Data</h2>
-                <div class="data-grid">
-                    <div class="data-point"> <div class="label">Pitch</div> <div class="value" id="data-pitch">-- °</div> </div>
-                    <div class="data-point"> <div class="label">Roll</div> <div class="value" id="data-roll">-- °</div> </div>
-                    <div class="data-point"> <div class="label">Heading</div> <div class="value" id="data-heading">-- °</div> </div>
-                    <div class="data-point"> <div class="label">Altitude (Rel)</div> <div class="value" id="data-alt">-- m</div> </div>
-                    <div class="data-point"> <div class="label">Latitude</div> <div class="value" id="data-latitude">--</div> </div>
-                    <div class="data-point"> <div class="label">Longitude</div> <div class="value" id="data-longitude">--</div> </div>
-                    <div class="data-point"> <div class="label">Ground Speed</div> <div class="value" id="data-groundspeed">-- m/s</div> </div>
-                    <div class="data-point"> <div class="label">Vertical Speed</div> <div class="value" id="data-climb">-- m/s</div> </div>
-                    <div class="data-point"> <div class="label">Rangefinder</div> <div class="value" id="data-rangefinder">-- m</div> </div>
-                </div>
-            </div>
-            <div id="log-panel" class="panel">
-                <h2>MAVLink Log</h2>
-                <div id="log-container"></div>
+                <button id="close-help" class="action-button">Got it</button>
             </div>
         </div>
 
-    </main>
-    
-    <script src="main.js" defer></script>
-</body>
+        <!-- Toast Container -->
+        <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+        <header>
+            <div class="header-left">
+                <img
+                    src="assets/logo.png"
+                    alt="King Phoenix Logo"
+                    class="header-logo"
+                />
+                <div class="header-title">
+                    <h1>King Phoenix AIO GCS</h1>
+                    <span class="data-age" id="data-age">No data</span>
+                </div>
+            </div>
+            <div class="status-bar">
+                <div class="status-item">
+                    <div class="status-icon" id="arm-icon">&#9679;</div>
+                    <div class="label">Arm</div>
+                    <div class="value" id="arm-status">DISARMED</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon" id="mode-icon">&#9992;</div>
+                    <div class="label">Flight Mode</div>
+                    <div class="value" id="flight-mode">--</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon" id="battery-icon">&#128267;</div>
+                    <div class="label">Battery</div>
+                    <div class="value" id="battery-level">--%</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-icon pulse" id="connection-icon">
+                        &#9679;
+                    </div>
+                    <div class="label">Link</div>
+                    <div class="value" id="connection-status">DISCONNECTED</div>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-container">
+            <div class="content-area">
+                <div id="camera-panel" class="panel">
+                    <div class="panel-header">
+                        <h2>Camera Feed</h2>
+                        <span class="panel-badge" id="camera-badge"
+                            >Waiting</span
+                        >
+                    </div>
+                    <div class="camera-wrapper">
+                        <img id="camera-feed" alt="Camera Feed" />
+                        <div id="camera-overlay" class="camera-overlay hidden">
+                            <div class="camera-overlay-content">
+                                <span class="camera-overlay-icon"
+                                    >&#128247;</span
+                                >
+                                <p>Camera feed unavailable</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div id="map-panel" class="panel">
+                    <div class="panel-header">
+                        <h2>Satellite Map</h2>
+                    </div>
+                    <div id="map"></div>
+                </div>
+            </div>
+
+            <div class="sidebar">
+                <div id="waypoint-planner" class="panel">
+                    <div class="panel-header">
+                        <h2>Waypoint Planner</h2>
+                        <span class="panel-badge" id="wp-badge">0 / 8</span>
+                    </div>
+                    <div class="button-group">
+                        <button
+                            id="record-wp-btn"
+                            class="action-button"
+                            title="Record next waypoint (Ctrl+Shift+R)"
+                        >
+                            <span class="btn-icon">&#10010;</span> Record
+                        </button>
+                        <button
+                            id="clear-wp-btn"
+                            class="action-button alt-action"
+                            title="Clear all waypoints (Ctrl+Shift+C)"
+                        >
+                            <span class="btn-icon">&#10006;</span> Clear
+                        </button>
+                    </div>
+                    <div id="wp-display">
+                        <p class="empty-state">No waypoints recorded.</p>
+                    </div>
+                </div>
+
+                <div id="actions-panel" class="panel">
+                    <div class="panel-header">
+                        <h2>Actions</h2>
+                    </div>
+                    <div class="button-group">
+                        <button
+                            id="start-mission-btn"
+                            class="action-button"
+                            title="Start mission (Ctrl+Shift+S)"
+                        >
+                            <span class="btn-icon">&#9654;</span> Start
+                        </button>
+                        <button
+                            id="stop-mission-btn"
+                            class="action-button"
+                            title="Stop mission (Ctrl+Shift+X)"
+                        >
+                            <span class="btn-icon">&#9632;</span> Stop
+                        </button>
+                    </div>
+                </div>
+
+                <div id="flight-data-panel" class="panel">
+                    <div class="panel-header">
+                        <h2>Flight Data</h2>
+                    </div>
+                    <div class="data-grid">
+                        <div class="data-point">
+                            <div class="label">Pitch</div>
+                            <div class="value" id="data-pitch">--</div>
+                            <div class="unit">deg</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Roll</div>
+                            <div class="value" id="data-roll">--</div>
+                            <div class="unit">deg</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Heading</div>
+                            <div class="value" id="data-heading">--</div>
+                            <div class="unit">deg</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Altitude</div>
+                            <div class="value" id="data-alt">--</div>
+                            <div class="unit">m</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Latitude</div>
+                            <div class="value" id="data-latitude">--</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Longitude</div>
+                            <div class="value" id="data-longitude">--</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Ground Speed</div>
+                            <div class="value" id="data-groundspeed">--</div>
+                            <div class="unit">m/s</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Vertical Speed</div>
+                            <div class="value" id="data-climb">--</div>
+                            <div class="unit">m/s</div>
+                        </div>
+                        <div class="data-point">
+                            <div class="label">Rangefinder</div>
+                            <div class="value" id="data-rangefinder">--</div>
+                            <div class="unit">m</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="log-panel" class="panel">
+                    <div class="panel-header">
+                        <h2>MAVLink Log</h2>
+                        <div class="log-controls">
+                            <span id="log-count" class="panel-badge">0</span>
+                            <button
+                                id="clear-log-btn"
+                                class="icon-button"
+                                title="Clear log"
+                            >
+                                &#128465;
+                            </button>
+                        </div>
+                    </div>
+                    <div id="log-container"></div>
+                </div>
+            </div>
+        </main>
+
+        <script src="main.js" defer></script>
+    </body>
 </html>
