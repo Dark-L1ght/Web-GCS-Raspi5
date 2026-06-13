@@ -7,11 +7,11 @@
 
 # Find the directory where this script is located. This is more reliable than pwd.
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-# We assume this setup script is in the project's root directory.
-PROJECT_ROOT="$SCRIPT_DIR"
+# The project root is the parent of the scripts/ directory.
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Define the full path to the virtual environment
-VENV_PATH="$PROJECT_ROOT/venv_hailo_rpi_examples" 
+VENV_PATH="$PROJECT_ROOT/venv_hailo_rpi_examples"
 
 # Function to check if the script is being sourced
 is_sourced() {

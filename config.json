@@ -1,0 +1,76 @@
+{
+  "network": {
+    "drone_ip": "192.168.10.212",
+    "drone_user": "kingphoenix",
+    "companion_ip": "192.168.10.179",
+    "gcs_ip": "192.168.10.237",
+    "flight_controller_ip": "192.168.144.31",
+    "mavlink_connection": "udp:127.0.0.1:14550",
+    "mavlink_server": "udp:0.0.0.0:14552",
+    "baud_rate": 921600,
+    "udp_receive_ip": "127.0.0.2",
+    "udp_receive_port": 5005,
+    "control_server_ip": "127.0.0.2",
+    "control_server_port": 5006,
+    "websocket_port": 8765,
+    "video_stream_port": 5001
+  },
+  "mission": {
+    "takeoff_altitude": 1.1,
+    "waypoint_radius": 0.5,
+    "arming_retries": 3,
+    "arming_retry_delay": 3,
+    "tracking_speed": 0.4,
+    "centering_speed": 0.25,
+    "fwd_gain": 0.6,
+    "blind_forward_speed": 0.2,
+    "landing_vertical_ratio": 0.5,
+    "centering_vertical_ratio": 0.5,
+    "centering_success_threshold": 0.1,
+    "landing_d_gain": 0.15,
+    "centering_d_gain": 0.2,
+    "landing_approach_alt": 0.45,
+    "landing_timeout": 30,
+    "forced_land_altitude": 0.4,
+    "max_down_vel": 0.1,
+    "min_down_vel": 0.03,
+    "centering_error_threshold": 0.5,
+    "winch_lower_duration": 3.0,
+    "winch_lift_duration": 1.0,
+    "winch_pull_up_duration": 4.0,
+    "centering_timeout": 15,
+    "centering_target_area_ratio": 0.05,
+    "centering_confirmation_duration": 0.5,
+    "final_verification_timeout": 1.5,
+    "final_verification_threshold": 0.15,
+    "target_lost_hover_duration": 2.5,
+    "reacquire_ascend_speed": 0.3,
+    "altitude_check_tolerance": 0.3,
+    "gain_max_alt": 1.0,
+    "gain_min_alt": 0.4,
+    "max_horizontal_gain": 0.8,
+    "min_horizontal_gain": 0.4
+  },
+  "paths": {
+    "project_root": "/home/kingphoenix/Web-GCS-Raspi5",
+    "model": "models/kpDetectv3.0-yolov11s.hef",
+    "labels": "backend/detection/target.json",
+    "scripts": {
+      "mission": "scripts/run_mission.sh",
+      "auto": "scripts/run_auto.sh"
+    }
+  },
+  "hardware": {
+    "winch": {
+      "motor_in1_pin": 17,
+      "motor_in2_pin": 27,
+      "motor_enable_pin": 12,
+      "speed": 1.0
+    }
+  },
+  "detection": {
+    "video_input": "/dev/video0",
+    "arch": "hailo8",
+    "valid_class_ids": [0, 1]
+  }
+}

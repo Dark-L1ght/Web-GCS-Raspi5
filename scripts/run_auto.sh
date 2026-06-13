@@ -10,6 +10,5 @@ echo "Wrapper script started. Sourcing environment..."
 # Source the setup script to prepare the environment
 source "$SCRIPT_DIR/setup_env.sh"
 
-echo "Environment sourced. Starting movement.py with waypoints..."
-# Execute the movement script, passing ALL arguments this script received ($@)
-python3 "$SCRIPT_DIR/backend/movement.py" "$@"
+echo "Environment sourced. Starting auto_start.py..."
+python3 "$SCRIPT_DIR/../backend/mission/auto_start.py"

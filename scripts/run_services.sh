@@ -21,18 +21,18 @@ GCS_LAPTOP_IP="192.168.10.237"
 # This function is called when the script is terminated (e.g., via Ctrl+C)
 cleanup() {
     echo -e "\n--- Shutting down services... ---"
-    
+
     # Kill the MAVProxy process if its Process ID (PID) exists
     if [ -n "$MAVPROXY_PID" ]; then
         echo "Stopping MAVProxy (PID: $MAVPROXY_PID)..."
         # Use kill -TERM for a graceful shutdown, then -9 if it fails
         kill -TERM $MAVPROXY_PID 2>/dev/null || kill -9 $MAVPROXY_PID 2>/dev/null
     fi
-    
+
     # Kill the video streamer using its known script name as a safety measure
     # This helps catch any orphaned processes if the main one fails to exit
     pkill -f video_streamer.py
-    
+
     echo "All services stopped."
     exit 0
 }
@@ -64,7 +64,7 @@ sleep 2 # Give MAVProxy a moment to initialize before starting the next process
 
 # --- Start Video Streamer as the Foreground Process ---
 echo "Starting video streamer..."
-python3 "$SCRIPT_DIR/backend/video_streamer.py"
+python3 "$SCRIPT_DIR/../backend/detection/video_streamer.py"
 
 # The script will pause here, running the video streamer.
 # When you press Ctrl+C, the 'trap' command will catch it and run the cleanup function.

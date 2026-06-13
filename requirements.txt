@@ -1,5 +1,26 @@
-# requirements.txt
+# Core dependencies
 pymavlink
 websockets
 numpy
 flask
+paramiko
+
+# Hardware / Platform
+pyserial
+# gpiozero          # Raspberry Pi only — install via apt if needed
+# pynput            # For manual test utilities
+
+# Hailo AI (system packages, not from PyPI)
+# hailo             # Install via Hailo SDK
+# hailo-apps        # Part of Hailo RPi examples
+
+# Servo / I2C
+# adafruit-circuitpython-pca9685
+# adafruit-circuitpython-motor
+# board             # Part of Adafruit Blinka
+
+# Computer Vision
+opencv-python
+
+# GStreamer bindings
+# PyGObject         # Install via system package manager

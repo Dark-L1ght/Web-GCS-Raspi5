@@ -1,21 +1,43 @@
+<<<<<<< HEAD:backend/video_streamer.py
 # --- IMPORTS ---
 from pathlib import Path
+=======
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
 import time
+from pathlib import Path
+
 import gi
-gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GLib
-import os
-import sys
-import hailo
-import numpy as np
-import cv2
-import socket
+
+gi.require_version("Gst", "1.0")
 import json
+import os
+import socket
+import sys
 import threading
+
+import cv2
+import hailo
 from flask import Flask, Response, render_template_string
-from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer
+from gi.repository import GLib, Gst
+from hailo_apps.hailo_app_python.core.common.buffer_utils import (
+    get_caps_from_pad,
+    get_numpy_from_buffer,
+)
 from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
+<<<<<<< HEAD:backend/video_streamer.py
 from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp
+=======
+
+# Resolve project-relative paths
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MODEL_PATH = str(PROJECT_ROOT / "models" / "kpDetectv3.0-yolov11s.hef")
+LABELS_PATH = str(PROJECT_ROOT / "backend" / "detection" / "target.json")
+
+
+from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import (
+    GStreamerDetectionApp,
+)
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
 
 # --- CONFIGURATION ---
 # UDP Communication Config
@@ -37,48 +59,76 @@ VERTICAL_CENTER_RATIO = 0.5
 flask_app = Flask(__name__)
 app_user_data = None
 
+
 def generate_frames():
     """Generator function for the video streaming."""
     while True:
-        if app_user_data is None: time.sleep(0.1); continue
+        if app_user_data is None:
+            time.sleep(0.1)
+            continue
         frame = app_user_data.get_output_frame()
-        if frame is None: time.sleep(0.01); continue
+        if frame is None:
+            time.sleep(0.01)
+            continue
         (flag, encoded_image) = cv2.imencode(".jpg", frame)
-        if not flag: continue
-        yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' +
-               bytearray(encoded_image) + b'\r\n')
+        if not flag:
+            continue
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + bytearray(encoded_image) + b"\r\n"
+        )
         GLib.usleep(50000)
 
-@flask_app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@flask_app.route('/')
+@flask_app.route("/video_feed")
+def video_feed():
+    return Response(
+        generate_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+@flask_app.route("/")
 def index():
     return render_template_string(
-        '<html><body><h1>Hailo AI Detection Stream</h1>'
-        '<img src="{{ url_for(\'video_feed\') }}">'
-        '</body></html>'
+        "<html><body><h1>Hailo AI Detection Stream</h1>"
+        "<img src=\"{{ url_for('video_feed') }}\">"
+        "</body></html>"
     )
+
 
 def control_command_listener():
     """Listens for TCP commands ('pause'/'resume') to control the UDP stream."""
     global app_user_data
-    if app_user_data is None: return
+    if app_user_data is None:
+        return
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('0.0.0.0', CONTROL_SERVER_PORT))
+        s.bind(("0.0.0.0", CONTROL_SERVER_PORT))
         s.listen()
         print(f"Control command listener started on port {CONTROL_SERVER_PORT}.")
         while True:
             conn, addr = s.accept()
             with conn:
-                data = conn.recv(1024).decode('utf-8')
-                if data == 'pause':
+                data = conn.recv(1024).decode("utf-8")
+                if data == "pause":
                     app_user_data.set_udp_sending(False)
                     print("UDP stream PAUSED.")
-                elif data == 'resume':
+                elif data == "resume":
                     app_user_data.set_udp_sending(True)
                     print("UDP stream RESUMED.")
+<<<<<<< HEAD:backend/video_streamer.py
+=======
+                elif data.startswith("set_ratio:"):
+                    try:
+                        ratio_str = data.split(":")[1]
+                        ratio = float(ratio_str)
+                        if 0.0 <= ratio <= 1.0:
+                            app_user_data.set_vertical_target_ratio(ratio)
+                            print(f"Vertical target ratio set to {ratio:.2f}")
+                        else:
+                            print(f"Warning: Received invalid ratio value: {ratio}")
+                    except (IndexError, ValueError) as e:
+                        print(f"Error parsing 'set_ratio' command ('{data}'): {e}")
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
 
 # --- USER CALLBACK CLASS (unchanged) ---
 class user_app_callback_class(app_callback_class):
@@ -90,6 +140,7 @@ class user_app_callback_class(app_callback_class):
         print(f"UDP socket created to send data to {UDP_IP}:{UDP_PORT}")
         self.control_lock = threading.Lock()
         self.is_sending_udp = True
+<<<<<<< HEAD:backend/video_streamer.py
     def set_output_frame(self, frame):
         with self.frame_lock: self.output_frame = frame.copy()
     def get_output_frame(self):
@@ -102,10 +153,45 @@ class user_app_callback_class(app_callback_class):
         self.sock.close()
 
 # --- GSTREAMER APP CALLBACK FUNCTION ---
+=======
+        self.vertical_target_ratio = 0.5  # Default to geometric center
+
+    def set_output_frame(self, frame):
+        with self.frame_lock:
+            self.output_frame = frame.copy()
+
+    def get_output_frame(self):
+        with self.frame_lock:
+            return self.output_frame
+
+    def set_udp_sending(self, should_send: bool):
+        with self.control_lock:
+            self.is_sending_udp = should_send
+
+    def can_send_udp(self):
+        with self.control_lock:
+            return self.is_sending_udp
+
+    def set_vertical_target_ratio(self, ratio: float):
+        with self.control_lock:
+            self.vertical_target_ratio = ratio
+
+    def get_vertical_target_ratio(self):
+        with self.control_lock:
+            return self.vertical_target_ratio
+
+    def close_socket(self):
+        self.sock.close()
+
+
+# --- GSTREAMER APP CALLBACK FUNCTION (from legacy) ---
+# This callback does NOT do fisheye correction. It only does detection.
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
 def app_callback(pad, info, user_data):
     """This function is called for every frame processed by the GStreamer pipeline."""
     buffer = info.get_buffer()
-    if buffer is None: return Gst.PadProbeReturn.OK
+    if buffer is None:
+        return Gst.PadProbeReturn.OK
 
     user_data.increment()
     format, width, height = get_caps_from_pad(pad)
@@ -119,14 +205,26 @@ def app_callback(pad, info, user_data):
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
     valid_detections = []
     for det in detections:
+<<<<<<< HEAD:backend/video_streamer.py
         if det.get_label() == "target":
             valid_detections.append({"detection": det, "class_id": 0})
         elif det.get_label() == "target_drop":
             valid_detections.append({"detection": det, "class_id": 1})
             
+=======
+        # Note: Updated this to match your newer model's labels
+        if det.get_label() in ["target", "target_drop", "gate"]:
+            valid_detections.append({"detection": det, "class_id": det.get_class_id()})
+
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
     data_packet = {}
     if valid_detections:
-        largest_detection_info = max(valid_detections, key=lambda d: d["detection"].get_bbox().width() * d["detection"].get_bbox().height())
+        largest_detection_info = max(
+            valid_detections,
+            key=lambda d: (
+                d["detection"].get_bbox().width() * d["detection"].get_bbox().height()
+            ),
+        )
         largest_target = largest_detection_info["detection"]
         bbox = largest_target.get_bbox()
         x_min_pix = int(bbox.xmin() * width)
@@ -135,7 +233,7 @@ def app_callback(pad, info, user_data):
         y_max_pix = int((bbox.ymin() + bbox.height()) * height)
         x_center = (x_min_pix + x_max_pix) / 2
         y_center = (y_min_pix + y_max_pix) / 2
-        
+
         data_packet = {
             "x_center": float(x_center),
             "y_center": float(y_center),
@@ -143,7 +241,7 @@ def app_callback(pad, info, user_data):
             "frame_width": int(width),
             "frame_height": int(height),
             "state": "TRACKING",
-            "class_id": largest_detection_info["class_id"]
+            "class_id": largest_detection_info["class_id"],
         }
         if frame is not None:
             cv2.rectangle(frame, (x_min_pix, y_min_pix), (x_max_pix, y_max_pix), (0, 255, 0), 2)
@@ -151,7 +249,7 @@ def app_callback(pad, info, user_data):
             cv2.putText(frame, label, (x_min_pix, y_min_pix - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     else:
         data_packet = {"state": "SEARCHING"}
-    
+
     if user_data.can_send_udp():
         user_data.sock.sendto(json.dumps(data_packet).encode(), (UDP_IP, UDP_PORT))
 
@@ -161,6 +259,7 @@ def app_callback(pad, info, user_data):
         # --- NEW: DRAW CENTER MARKER ON FRAME ---
         if width and height:
             center_x = int(width / 2)
+<<<<<<< HEAD:backend/video_streamer.py
             # Use the offset to calculate the true center Y position
             target_y = int(height * VERTICAL_CENTER_RATIO)
             
@@ -168,11 +267,30 @@ def app_callback(pad, info, user_data):
             cv2.line(bgr_frame, (center_x - 15, target_y), (center_x + 15, target_y), (0, 0, 255), 2)
             cv2.line(bgr_frame, (center_x, target_y - 15), (center_x, target_y + 15), (0, 0, 255), 2)
         # --- END NEW ---
+=======
+            current_target_ratio = user_data.get_vertical_target_ratio()
+            target_y = int(height * current_target_ratio)
+            cv2.line(
+                bgr_frame,
+                (center_x - 15, target_y),
+                (center_x + 15, target_y),
+                (0, 0, 255),
+                2,
+            )
+            cv2.line(
+                bgr_frame,
+                (center_x, target_y - 15),
+                (center_x, target_y + 15),
+                (0, 0, 255),
+                2,
+            )
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
 
         user_data.set_output_frame(bgr_frame)
 
     return Gst.PadProbeReturn.OK
 
+<<<<<<< HEAD:backend/video_streamer.py
 # --- MAIN EXECUTION BLOCK (unchanged) ---
 if __name__ == "__main__":
     user_data = user_app_callback_class()
@@ -191,6 +309,37 @@ if __name__ == "__main__":
        "--input", "/dev/video0",
        "--use-frame",
     ]
+=======
+
+# --- MAIN EXECUTION BLOCK ---
+if __name__ == "__main__":
+    user_data = user_app_callback_class()
+    app_user_data = user_data
+
+    print("Starting control command listener thread...")
+    control_thread = threading.Thread(target=control_command_listener, daemon=True)
+    control_thread.start()
+
+    # You can uncomment this if you want the Flask stream
+    # print(f"Starting video streaming server on http://0.0.0.0:{SERVER_PORT}")
+    # flask_thread = threading.Thread(target=lambda: flask_app.run(host='0.0.0.0', port=SERVER_PORT, debug=False), daemon=True)
+    # flask_thread.start()
+
+    fake_argv = [
+        "video_streamer.py",
+        "--hef-path",
+        MODEL_PATH,
+        "--labels-json",
+        LABELS_PATH,
+        "--arch",
+        "hailo8",
+        "--input",
+        "/dev/video0",
+        "--use-frame",
+    ]
+    # --- END OF MODIFICATIONS ---
+
+>>>>>>> e60d4f4 (refactor: remove legacy backend scripts and restructure project):backend/detection/video_streamer.py
     sys.argv = fake_argv
     app = GStreamerDetectionApp(app_callback, user_data)
     try:
